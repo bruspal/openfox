@@ -1,4 +1,4 @@
-import { spawn, execSync } from 'node:child_process'
+import { spawn, execSync, execFileSync } from 'node:child_process'
 import { mkdir } from 'node:fs/promises'
 import { resolve, join, isAbsolute } from 'node:path'
 import { homedir, platform } from 'node:os'
@@ -320,10 +320,10 @@ export async function deleteWorkspace(projectName: string, name: string, project
   if (!st?.isDirectory()) {
     throw new Error(`Workspace "${name}" does not exist`)
   }
-  const { rm } = await import('node:fs/promises')
   try {
-    execSync(`rm -rf "${wsPath}"`, { stdio: 'ignore', timeout: 10_000 })
+    execFileSync('rm', ['-rf', wsPath], { stdio: 'ignore' })
   } catch {
+    const { rm } = await import('node:fs/promises')
     await rm(wsPath, { recursive: true, force: true })
   }
   logger.info('Deleted workspace', { projectName, name, path: wsPath })
