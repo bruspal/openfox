@@ -115,8 +115,7 @@ async function createSystemdService(): Promise<void> {
   const servicePath = expandPath(SERVICE_PATH)
   const serviceContent = `[Unit]
 Description=OpenFox Agentic Coding Assistant
-After=graphical-session.target
-Wants=graphical-session.target
+After=default.target
 
 [Service]
 Type=simple
@@ -127,7 +126,7 @@ KillMode=control-group
 Environment=OPENFOX_SERVICE=true
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=default.target
 `
   await writeFile(servicePath, serviceContent, 'utf-8')
   console.log(`Created: ${servicePath}`)
