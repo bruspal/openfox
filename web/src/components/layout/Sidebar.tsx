@@ -11,7 +11,7 @@ import { CloseButton } from '../shared/CloseButton'
 import { ConfirmModal } from '../shared/ConfirmModal'
 import { Modal } from '../shared/Modal'
 import { ModalFooter } from '../shared/ModalFooter'
-import { EllipsisIcon, SpinIcon, StopIcon, SearchIcon, XCloseIcon } from '../shared/icons'
+import { EllipsisIcon, SpinIcon, StopIcon, SearchIcon, XCloseIcon, StarIcon, StarFilledIcon } from '../shared/icons'
 import { groupSessionsByDate, formatDateHeader, formatTime } from '../../lib/format-date.js'
 import { fuzzyMatch, highlightMatches } from '../../lib/modal-utils.js'
 import { useBinding, useKeybindings } from '../../hooks/useKeybindings.js'
@@ -40,6 +40,7 @@ export function Sidebar({ projectId, isOpen = true, onClose }: SidebarProps) {
   const sessionsPaginationLoading = useSessionStore((state) => state.sessionsPaginationLoading)
   const sessionsWithPendingConfirmations = useSessionStore((state) => state.sessionsWithPendingConfirmations)
   const pendingPathConfirmations = useSessionStore((state) => state.pendingPathConfirmations)
+  const toggleFavorite = useSessionStore((state) => state.toggleFavorite)
 
   const currentProject = useProjectStore((state) => state.currentProject)
 
@@ -91,22 +92,40 @@ export function Sidebar({ projectId, isOpen = true, onClose }: SidebarProps) {
   // Filter sessions to those belonging to the current project by ID
   const projectSessions = sessions.filter((session) => session.projectId === currentProject?.id)
 
-  const filteredSessions = useMemo(() => {
-    if (!searchQuery) return projectSessions
-    return projectSessions.filter((s) => {
+  const [favoriteSessions, otherSessions] = useMemo(() => {
+    const favs: SessionSummary[] = []
+    const others: SessionSummary[] = []
+    for (const s of projectSessions) {
+      if (s.isFavorite) {
+        favs.push(s)
+      } else {
+        others.push(s)
+      }
+    }
+    return [favs, others]
+  }, [projectSessions])
+
+  const applySearch = (list: SessionSummary[]) => {
+    if (!searchQuery) return list
+    return list.filter((s) => {
       const title = s.title ?? ''
       const promptsJoined = (s.recentUserPrompts?.map((p) => p.content) ?? []).join(' ')
       return fuzzyMatch(title, searchQuery) || fuzzyMatch(promptsJoined, searchQuery)
     })
-  }, [projectSessions, searchQuery])
+  }
+
+  const filteredFavorites = useMemo(() => applySearch(favoriteSessions), [favoriteSessions, searchQuery])
+  const filteredOthers = useMemo(() => applySearch(otherSessions), [otherSessions, searchQuery])
+
+  const allFiltered = [...filteredFavorites, ...filteredOthers]
 
   const isSearching = searchQuery.length > 0
-  const hasNoResults = isSearching && filteredSessions.length === 0
+  const hasNoResults = isSearching && allFiltered.length === 0
 
   // Reset focused index when search results change
   useEffect(() => {
-    setFocusedIndex(filteredSessions.length > 0 ? 0 : -1)
-  }, [filteredSessions.length])
+    setFocusedIndex(allFiltered.length > 0 ? 0 : -1)
+  }, [allFiltered.length])
 
   // Scroll focused item into view
   useEffect(() => {
@@ -155,6 +174,12 @@ export function Sidebar({ projectId, isOpen = true, onClose }: SidebarProps) {
     setShowDeleteAll(false)
   }
 
+  const handleToggleFavorite = (sessionId: string, isFavorite: boolean, e?: React.MouseEvent) => {
+    e?.preventDefault()
+    e?.stopPropagation()
+    toggleFavorite(sessionId, !isFavorite)
+  }
+
   const handleSessionListClick = (e: React.MouseEvent) => {
     if (!wasAutoOpenedRef.current) return
     const link = (e.target as HTMLElement).closest('a[href*="/s/"]')
@@ -177,7 +202,7 @@ export function Sidebar({ projectId, isOpen = true, onClose }: SidebarProps) {
         break
       case 'ArrowDown':
         e.preventDefault()
-        setFocusedIndex((prev) => (prev < filteredSessions.length - 1 ? prev + 1 : prev))
+        setFocusedIndex((prev) => (prev < allFiltered.length - 1 ? prev + 1 : prev))
         break
       case 'ArrowUp':
         e.preventDefault()
@@ -185,7 +210,7 @@ export function Sidebar({ projectId, isOpen = true, onClose }: SidebarProps) {
         break
       case 'Enter': {
         e.preventDefault()
-        const session = filteredSessions[focusedIndex]
+        const session = allFiltered[focusedIndex]
         if (session) {
           navigate(`/p/${projectId}/s/${session.id}`)
           if (wasAutoOpenedRef.current) {
@@ -266,7 +291,7 @@ export function Sidebar({ projectId, isOpen = true, onClose }: SidebarProps) {
               </div>
               {isSearching && !hasNoResults && (
                 <div className="mt-1 text-xs text-text-muted px-1">
-                  {filteredSessions.length} {filteredSessions.length === 1 ? 'match' : 'matches'}
+                  {allFiltered.length} {allFiltered.length === 1 ? 'match' : 'matches'}
                 </div>
               )}
             </div>
@@ -335,19 +360,21 @@ export function Sidebar({ projectId, isOpen = true, onClose }: SidebarProps) {
             </Modal>
 
             <ScrollArea className="flex-1">
-              {filteredSessions.length === 0 ? (
+              {allFiltered.length === 0 ? (
                 <div className="p-4 text-center text-text-muted text-xs">
                   {isSearching ? 'No matching sessions' : 'No sessions'}
                 </div>
               ) : (
                 <>
                   <div className="divide-y divide-border" ref={sessionListRef} onClick={handleSessionListClick}>
-                    {renderSessionGroups(
-                      filteredSessions,
+                    {renderSessionList(
+                      filteredFavorites,
+                      filteredOthers,
                       currentSession,
                       unreadSessionIds,
                       handleDeleteSession,
                       handleRenameSession,
+                      handleToggleFavorite,
                       projectId,
                       sessionsWithPendingConfirmations,
                       pendingPathConfirmations,
@@ -385,110 +412,146 @@ export function Sidebar({ projectId, isOpen = true, onClose }: SidebarProps) {
   )
 }
 
-function renderSessionGroups(
-  projectSessions: SessionSummary[],
+function renderSessionList(
+  favoriteSessions: SessionSummary[],
+  otherSessions: SessionSummary[],
   currentSession: { id: string | null } | null,
   unreadSessionIds: string[],
   handleDeleteSession: (sessionId: string, e?: React.MouseEvent) => void,
   handleRenameSession: (sessionId: string, e?: React.MouseEvent) => void,
+  handleToggleFavorite: (sessionId: string, isFavorite: boolean, e?: React.MouseEvent) => void,
   projectId: string,
   sessionsWithPendingConfirmations: string[],
   pendingPathConfirmations: PendingPathConfirmation[],
   searchQuery: string,
   focusedIndex: number,
 ) {
-  const groups = groupSessionsByDate(projectSessions)
-
   let flatIdx = 0
 
-  return Array.from(groups).map(([dateKey, daySessions]) => {
-    const firstSession = daySessions[0]
-    if (!firstSession) return null
+  const renderSession = (session: SessionSummary) => {
+    const idx = flatIdx++
+    const isActive = currentSession?.id === session.id
+    const isFocused = idx === focusedIndex
+    const hasUnread = unreadSessionIds.includes(session.id)
+    const isRunning = session.isRunning
+    const isFavorite = session.isFavorite
+    const hasPendingConfirmation =
+      sessionsWithPendingConfirmations.includes(session.id) || (isActive && pendingPathConfirmations.length > 0)
 
     return (
-      <div key={dateKey}>
-        {/* Date header */}
-        <div className="px-4 py-2 bg-bg-tertiary/30 text-text-muted text-xs font-medium">
-          {formatDateHeader(firstSession.updatedAt)}
-        </div>
-
-        {/* Sessions for this day */}
-        {daySessions.map((session) => {
-          const idx = flatIdx++
-          const isActive = currentSession?.id === session.id
-          const isFocused = idx === focusedIndex
-          const hasUnread = unreadSessionIds.includes(session.id)
-          const isRunning = session.isRunning
-          const hasPendingConfirmation =
-            sessionsWithPendingConfirmations.includes(session.id) || (isActive && pendingPathConfirmations.length > 0)
-          return (
-            <div
-              key={session.id}
-              data-sidx={idx}
-              className={`w-full px-4 py-3 text-left hover:bg-bg-tertiary/50 transition-colors group ${
-                isActive ? 'bg-bg-tertiary' : ''
-              } ${isFocused ? 'bg-accent-primary/10' : ''}`}
-            >
-              <Link
-                href={`/p/${projectId}/s/${session.id}`}
-                className={`block ${isActive ? 'text-accent-primary' : 'text-text-primary'} hover:text-accent-primary`}
+      <div
+        key={session.id}
+        data-sidx={idx}
+        className={`w-full px-4 py-3 text-left hover:bg-bg-tertiary/50 transition-colors group ${
+          isActive ? 'bg-bg-tertiary' : ''
+        } ${isFocused ? 'bg-accent-primary/10' : ''}`}
+      >
+        <Link
+          href={`/p/${projectId}/s/${session.id}`}
+          className={`block ${isActive ? 'text-accent-primary' : 'text-text-primary'} hover:text-accent-primary`}
+        >
+          <div className="flex justify-between items-center mb-1">
+            <span className={`font-medium truncate text-sm ${isActive ? 'text-accent-primary' : 'text-text-primary'}`}>
+              {searchQuery
+                ? highlightMatches(session.title ?? session.id.slice(0, 6), searchQuery)
+                : (session.title ?? session.id.slice(0, 6))}
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={(e) => handleToggleFavorite(session.id, isFavorite, e)}
+                className="p-1.5 rounded hover:bg-bg-tertiary text-text-muted hover:text-text-primary transition-all"
+                title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
               >
-                <div className="flex justify-between items-center mb-1">
-                  <span
-                    className={`font-medium truncate text-sm ${isActive ? 'text-accent-primary' : 'text-text-primary'}`}
+                {isFavorite ? (
+                  <StarFilledIcon className="w-3.5 h-3.5 text-amber-400" />
+                ) : (
+                  <StarIcon className="w-3.5 h-3.5" />
+                )}
+              </button>
+              <DropdownMenu
+                items={[
+                  {
+                    label: 'Rename session',
+                    onClick: (e?: React.MouseEvent) => handleRenameSession(session.id, e),
+                  },
+                  {
+                    label: 'Delete session',
+                    onClick: (e?: React.MouseEvent) => handleDeleteSession(session.id, e),
+                    danger: true,
+                  },
+                ]}
+                trigger={
+                  <button
+                    onClick={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                    }}
+                    className="p-1.5 rounded hover:bg-bg-tertiary text-text-muted hover:text-text-primary transition-all"
+                    title="Options"
                   >
-                    {searchQuery
-                      ? highlightMatches(session.title ?? session.id.slice(0, 6), searchQuery)
-                      : (session.title ?? session.id.slice(0, 6))}
-                  </span>
-                  <DropdownMenu
-                    items={[
-                      {
-                        label: 'Rename session',
-                        onClick: (e?: React.MouseEvent) => handleRenameSession(session.id, e),
-                      },
-                      {
-                        label: 'Delete session',
-                        onClick: (e?: React.MouseEvent) => handleDeleteSession(session.id, e),
-                        danger: true,
-                      },
-                    ]}
-                    trigger={
-                      <button
-                        onClick={(e) => e.preventDefault()}
-                        className="p-1.5 rounded hover:bg-bg-tertiary text-text-muted hover:text-text-primary transition-all"
-                        title="Options"
-                      >
-                        <EllipsisIcon />
-                      </button>
-                    }
-                  />
-                </div>
-                {/* Time displayed below the title as muted secondary text */}
-                <div className="flex items-center gap-2 mt-1">
-                  {hasPendingConfirmation ? (
-                    <span title="Awaiting confirmation">
-                      <StopIcon className="w-3 h-3 text-red-400 flex-shrink-0" />
-                    </span>
-                  ) : isRunning ? (
-                    <SpinIcon />
-                  ) : hasUnread && !isActive ? (
-                    <span
-                      aria-label="Unread activity"
-                      title="Unread activity"
-                      className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0"
-                    />
-                  ) : null}
-                  {/* Time in muted style */}
-                  <span className="text-text-muted text-xs flex-shrink-0">{formatTime(session.updatedAt)}</span>
-                  {/* Message count in muted style */}
-                  <span className="text-text-muted text-xs flex-shrink-0">{session.messageCount} messages</span>
-                </div>
-              </Link>
+                    <EllipsisIcon />
+                  </button>
+                }
+              />
             </div>
-          )
-        })}
+          </div>
+          {/* Time displayed below the title as muted secondary text */}
+          <div className="flex items-center gap-2 mt-1">
+            {hasPendingConfirmation ? (
+              <span title="Awaiting confirmation">
+                <StopIcon className="w-3 h-3 text-red-400 flex-shrink-0" />
+              </span>
+            ) : isRunning ? (
+              <SpinIcon />
+            ) : hasUnread && !isActive ? (
+              <span
+                aria-label="Unread activity"
+                title="Unread activity"
+                className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0"
+              />
+            ) : null}
+            {/* Time in muted style */}
+            <span className="text-text-muted text-xs flex-shrink-0">{formatTime(session.updatedAt)}</span>
+            {/* Message count in muted style */}
+            <span className="text-text-muted text-xs flex-shrink-0">{session.messageCount} messages</span>
+          </div>
+        </Link>
       </div>
     )
-  })
+  }
+
+  const renderGroupedSessions = (sessionList: SessionSummary[]) => {
+    const groups = groupSessionsByDate(sessionList)
+    return Array.from(groups).map(([dateKey, daySessions]) => {
+      const firstSession = daySessions[0]
+      if (!firstSession) return null
+
+      return (
+        <div key={dateKey}>
+          <div className="px-4 py-2 bg-bg-tertiary/30 text-text-muted text-xs font-medium">
+            {formatDateHeader(firstSession.updatedAt)}
+          </div>
+          {daySessions.map((session) => renderSession(session))}
+        </div>
+      )
+    })
+  }
+
+  return (
+    <>
+      {/* Pinned favorites section */}
+      {favoriteSessions.length > 0 && (
+        <div>
+          <div className="px-4 py-2 bg-bg-tertiary/50 text-text-primary text-xs font-semibold flex items-center gap-1">
+            <StarFilledIcon className="w-3 h-3 text-amber-400" />
+            Favorites
+          </div>
+          {favoriteSessions.map((session) => renderSession(session))}
+        </div>
+      )}
+
+      {/* Regular sessions grouped by date */}
+      {otherSessions.length > 0 && renderGroupedSessions(otherSessions)}
+    </>
+  )
 }

@@ -93,6 +93,8 @@ vi.mock('../shared/icons', () => ({
   StopIcon: () => <span data-testid="stop-icon" />,
   SearchIcon: () => <span data-testid="search-icon">🔍</span>,
   XCloseIcon: () => <span data-testid="xclose-icon">✕</span>,
+  StarIcon: () => <span data-testid="star-icon">☆</span>,
+  StarFilledIcon: () => <span data-testid="star-filled-icon">★</span>,
 }))
 
 beforeEach(() => {

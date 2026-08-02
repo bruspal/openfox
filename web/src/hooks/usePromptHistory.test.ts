@@ -17,6 +17,7 @@ function mockSession(partial: Partial<SessionSummary> & Pick<SessionSummary, 'id
     mode: 'builder',
     phase: 'build',
     isRunning: false,
+    isFavorite: false,
     createdAt: '2026-03-24T10:00:00Z',
     updatedAt: '2026-03-24T10:00:00Z',
     criteriaCount: 0,

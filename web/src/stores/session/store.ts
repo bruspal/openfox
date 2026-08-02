@@ -474,7 +474,8 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
           // Restore cross-session confirmation state from server
           const pendingBySession = data.pendingConfirmationsBySession as
-            Record<string, PendingPathConfirmation[]> | undefined
+            | Record<string, PendingPathConfirmation[]>
+            | undefined
           if (pendingBySession) {
             const currentSessionId = get().currentSession?.id
             const crossSessionConfirmations: Record<string, PendingPathConfirmation[]> = {}
@@ -560,6 +561,37 @@ export const useSessionStore = create<SessionState>((set, get) => {
         }
         return true
       } catch {
+        return false
+      }
+    },
+
+    toggleFavorite: async (sessionId: string, isFavorite: boolean) => {
+      // Optimistic update: flip immediately for responsive UI
+      set((state) => ({
+        sessions: state.sessions.map((s) => (s.id === sessionId ? { ...s, isFavorite } : s)),
+      }))
+      try {
+        const res = await authFetch(`/api/sessions/${sessionId}/favorite`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ isFavorite }),
+        })
+        if (!res.ok) {
+          console.warn('Failed to toggle favorite', { sessionId, isFavorite, status: res.status })
+          // Revert optimistic update
+          set((state) => ({
+            sessions: state.sessions.map((s) => (s.id === sessionId ? { ...s, isFavorite: !isFavorite } : s)),
+          }))
+          return false
+        }
+        await get().listSessions()
+        return true
+      } catch (error) {
+        console.error('Error toggling favorite:', error)
+        // Revert optimistic update
+        set((state) => ({
+          sessions: state.sessions.map((s) => (s.id === sessionId ? { ...s, isFavorite: !isFavorite } : s)),
+        }))
         return false
       }
     },

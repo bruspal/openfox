@@ -250,6 +250,7 @@ describe('useSessionStore session isolation', () => {
           mode: 'planner',
           phase: 'plan',
           isRunning: false,
+          isFavorite: false,
           createdAt: 'a',
           updatedAt: 'b',
           criteriaCount: 0,
@@ -263,6 +264,7 @@ describe('useSessionStore session isolation', () => {
           mode: 'builder',
           phase: 'build',
           isRunning: false,
+          isFavorite: false,
           createdAt: 'a',
           updatedAt: 'b',
           criteriaCount: 0,
@@ -298,6 +300,7 @@ describe('useSessionStore session isolation', () => {
         mode: 'planner',
         phase: 'verification',
         isRunning: true,
+        isFavorite: false,
         createdAt: 'a',
         updatedAt: 'b',
         criteriaCount: 0,
@@ -311,6 +314,7 @@ describe('useSessionStore session isolation', () => {
         mode: 'builder',
         phase: 'build',
         isRunning: false,
+        isFavorite: false,
         createdAt: 'a',
         updatedAt: 'b',
         criteriaCount: 0,
@@ -335,6 +339,7 @@ describe('useSessionStore session isolation', () => {
           mode: 'planner',
           phase: 'build',
           isRunning: true,
+          isFavorite: false,
           createdAt: 'a',
           updatedAt: 'b',
           criteriaCount: 0,
@@ -423,6 +428,7 @@ describe('useSessionStore session isolation', () => {
           mode: 'planner',
           phase: 'build',
           isRunning: true,
+          isFavorite: false,
           createdAt: 'a',
           updatedAt: 'b',
           criteriaCount: 0,
@@ -477,6 +483,7 @@ describe('useSessionStore session isolation', () => {
           mode: 'planner',
           phase: 'plan',
           isRunning: true,
+          isFavorite: false,
           createdAt: 'a',
           updatedAt: 'b',
           criteriaCount: 0,
@@ -490,6 +497,7 @@ describe('useSessionStore session isolation', () => {
           mode: 'builder',
           phase: 'build',
           isRunning: false,
+          isFavorite: false,
           createdAt: 'a',
           updatedAt: 'b',
           criteriaCount: 0,
@@ -712,6 +720,7 @@ describe('useSessionStore session isolation', () => {
           mode: 'planner',
           phase: 'plan',
           isRunning: false,
+          isFavorite: false,
           createdAt: 'a',
           updatedAt: 'b',
           criteriaCount: 0,
@@ -749,6 +758,7 @@ describe('useSessionStore session isolation', () => {
         mode: 'builder',
         phase: 'build',
         isRunning: false,
+        isFavorite: false,
         createdAt: 'a',
         updatedAt: 'b',
         criteriaCount: 0,
@@ -771,6 +781,7 @@ describe('useSessionStore session isolation', () => {
           mode: 'planner',
           phase: 'build',
           isRunning: true,
+          isFavorite: false,
           createdAt: 'a',
           updatedAt: 'b',
           criteriaCount: 0,
@@ -1177,6 +1188,7 @@ describe('useSessionStore session isolation', () => {
           mode: 'planner' as const,
           phase: 'plan' as const,
           isRunning: false,
+          isFavorite: false,
           createdAt: '2024-01-01T00:00:00.000Z',
           updatedAt: '2024-01-01T00:00:00.000Z',
           criteriaCount: 0,
@@ -2304,5 +2316,146 @@ describe('cross-tab sidebar sync', () => {
         !String((c as unknown[])[0]).includes('/background-processes'),
     ).length
     expect(fetches).toBe(2)
+  })
+})
+
+describe('toggleFavorite', () => {
+  beforeEach(() => {
+    fetchMock.mockClear()
+  })
+
+  it('calls the favorite API with isFavorite, applies optimistic update, and refreshes on success', async () => {
+    const useSessionStore = await loadSessionStore()
+
+    useSessionStore.setState((state) => ({
+      ...state,
+      sessions: [
+        {
+          id: 'session-1',
+          projectId: 'project-1',
+          workdir: '/tmp/project-1',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: false,
+          isFavorite: false,
+          createdAt: 'a',
+          updatedAt: 'b',
+          criteriaCount: 0,
+          criteriaCompleted: 0,
+          messageCount: 0,
+        },
+      ],
+    }))
+
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true }),
+      } as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            sessions: [],
+            hasMore: false,
+          }),
+      } as any)
+
+    const promise = useSessionStore.getState().toggleFavorite('session-1', true)
+
+    // Optimistic flip is applied before the API resolves
+    expect(useSessionStore.getState().sessions.find((s) => s.id === 'session-1')?.isFavorite).toBe(true)
+
+    const result = await promise
+
+    expect(result).toBe(true)
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/sessions/session-1/favorite',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ isFavorite: true }),
+      }),
+    )
+    // listSessions refresh
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/sessions?limit=20', expect.objectContaining({}))
+  })
+
+  it('returns false, reverts the optimistic update, and does not refresh the list when the API fails', async () => {
+    const useSessionStore = await loadSessionStore()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    useSessionStore.setState((state) => ({
+      ...state,
+      sessions: [
+        {
+          id: 'session-1',
+          projectId: 'project-1',
+          workdir: '/tmp/project-1',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: false,
+          isFavorite: true,
+          createdAt: 'a',
+          updatedAt: 'b',
+          criteriaCount: 0,
+          criteriaCompleted: 0,
+          messageCount: 0,
+        },
+      ],
+    }))
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ error: 'isFavorite is required and must be a boolean' }),
+    } as any)
+
+    const result = await useSessionStore.getState().toggleFavorite('session-1', false)
+
+    expect(result).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // Optimistic flip was reverted to the original value
+    expect(useSessionStore.getState().sessions.find((s) => s.id === 'session-1')?.isFavorite).toBe(true)
+    expect(warnSpy).toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+
+  it('returns false and reverts the optimistic update when the API call throws', async () => {
+    const useSessionStore = await loadSessionStore()
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    useSessionStore.setState((state) => ({
+      ...state,
+      sessions: [
+        {
+          id: 'session-1',
+          projectId: 'project-1',
+          workdir: '/tmp/project-1',
+          mode: 'planner',
+          phase: 'plan',
+          isRunning: false,
+          isFavorite: false,
+          createdAt: 'a',
+          updatedAt: 'b',
+          criteriaCount: 0,
+          criteriaCompleted: 0,
+          messageCount: 0,
+        },
+      ],
+    }))
+
+    fetchMock.mockRejectedValueOnce(new Error('network error'))
+
+    const result = await useSessionStore.getState().toggleFavorite('session-1', true)
+
+    expect(result).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // Optimistic flip was reverted
+    expect(useSessionStore.getState().sessions.find((s) => s.id === 'session-1')?.isFavorite).toBe(false)
+    expect(errorSpy).toHaveBeenCalled()
+    errorSpy.mockRestore()
   })
 })

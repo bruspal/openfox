@@ -61,6 +61,7 @@ describe('groupSessionsByDate', () => {
     mode: 'planner',
     phase: 'done',
     isRunning: false,
+    isFavorite: false,
     createdAt: updatedAt,
     updatedAt,
     criteriaCount: 0,

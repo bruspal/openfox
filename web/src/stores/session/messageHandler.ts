@@ -92,6 +92,7 @@ function mergeSessionIntoSummary(
         mode: session.mode,
         phase: session.phase,
         isRunning: session.isRunning,
+        isFavorite: false,
         createdAt: '',
         updatedAt: '',
         criteriaCount: session.criteria.length,

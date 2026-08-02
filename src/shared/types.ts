@@ -132,6 +132,7 @@ export interface SessionSummary {
   mode: SessionMode
   phase: SessionPhase // Current workflow phase
   isRunning: boolean
+  isFavorite: boolean // Whether the session is favorited for pinning
   providerId?: string | null // Per-session provider override
   providerModel?: string | null // Per-session model override
   createdAt: string
@@ -150,7 +151,9 @@ export type MessageRole = 'user' | 'assistant' | 'system' | 'tool'
 
 // Segment types for preserving streaming order
 export type MessageSegment =
-  { type: 'text'; content: string } | { type: 'thinking'; content: string } | { type: 'tool_call'; toolCallId: string }
+  | { type: 'text'; content: string }
+  | { type: 'thinking'; content: string }
+  | { type: 'tool_call'; toolCallId: string }
 
 export interface MessageStats {
   providerId: string

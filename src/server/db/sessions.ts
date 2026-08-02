@@ -14,7 +14,8 @@ function getProjectDangerLevel(projectId: string): DangerLevel {
   try {
     const db = getDatabase()
     const row = db.prepare('SELECT danger_level FROM projects WHERE id = ?').get(projectId) as
-      { danger_level: string | null } | undefined
+      | { danger_level: string | null }
+      | undefined
     return (row?.danger_level as DangerLevel) ?? 'normal'
   } catch {
     return 'normal'
@@ -247,7 +248,8 @@ export function getSessionCachedPrompt(id: string): {
   `,
     )
     .get(id) as
-    { cached_system_prompt: string | null; cached_tools: string | null; cached_hash: string | null } | undefined
+    | { cached_system_prompt: string | null; cached_tools: string | null; cached_hash: string | null }
+    | undefined
 
   if (!row || !row.cached_system_prompt || !row.cached_tools || !row.cached_hash) {
     return null
@@ -280,7 +282,8 @@ export function getSessionMessageCount(id: string): number {
   try {
     const db = getDatabase()
     const row = db.prepare(`SELECT message_count FROM sessions WHERE id = ?`).get(id) as
-      { message_count: number } | undefined
+      | { message_count: number }
+      | undefined
     return row?.message_count ?? 0
   } catch {
     // Database not initialized (test scenarios) - return 0
@@ -303,6 +306,7 @@ export function listSessions(): SessionSummary[] {
       s.mode,
       s.workflow_phase,
       s.is_running,
+      s.is_favorite,
       s.created_at,
       s.updated_at,
       s.title,
@@ -310,7 +314,7 @@ export function listSessions(): SessionSummary[] {
       s.provider_model,
       s.message_count
     FROM sessions s
-    ORDER BY s.updated_at DESC
+    ORDER BY s.is_favorite DESC, s.updated_at DESC
   `,
     )
     .all() as SessionSummaryRow[]
@@ -337,6 +341,7 @@ export function listSessionsByProject(
       s.mode,
       s.workflow_phase,
       s.is_running,
+      s.is_favorite,
       s.created_at,
       s.updated_at,
       s.title,
@@ -345,7 +350,7 @@ export function listSessionsByProject(
       s.message_count
     FROM sessions s
     WHERE s.project_id = ?
-    ORDER BY s.updated_at DESC
+    ORDER BY s.is_favorite DESC, s.updated_at DESC
     LIMIT ? OFFSET ?
   `,
     )
@@ -420,7 +425,13 @@ function mapSessionSummaryRow(row: SessionSummaryRow): SessionSummary {
     criteriaCount: 0,
     criteriaCompleted: 0,
     messageCount: row.message_count,
+    isFavorite: Boolean(row.is_favorite),
   }
+}
+
+export function toggleFavorite(id: string, isFavorite: boolean): void {
+  const db = getDatabase()
+  db.prepare(`UPDATE sessions SET is_favorite = ? WHERE id = ?`).run(isFavorite ? 1 : 0, id)
 }
 
 // ============================================================================
@@ -461,6 +472,7 @@ interface SessionSummaryRow {
   mode: string
   workflow_phase: string
   is_running: number
+  is_favorite: number
   created_at: string
   updated_at: string
   title: string | null

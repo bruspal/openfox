@@ -18,6 +18,7 @@ import {
   getSession,
   listSessions,
   listSessionsByProject,
+  toggleFavorite,
   updateSessionMcpDisabledServers,
   updateSessionMetadata,
   updateSessionMode,
@@ -302,5 +303,69 @@ describe('db sessions', () => {
       mcp_disabled_servers: string | null
     }
     expect(row.mcp_disabled_servers).toBeNull()
+  })
+
+  it('toggles favorite on and off', () => {
+    const session = createSession(projectAId, rootA, 'Favorite Test')
+
+    // Default should be not favorite
+    const rowBefore = getDatabase().prepare('SELECT is_favorite FROM sessions WHERE id = ?').get(session.id) as {
+      is_favorite: number
+    }
+    expect(rowBefore.is_favorite).toBe(0)
+
+    // Toggle on
+    toggleFavorite(session.id, true)
+    const rowOn = getDatabase().prepare('SELECT is_favorite FROM sessions WHERE id = ?').get(session.id) as {
+      is_favorite: number
+    }
+    expect(rowOn.is_favorite).toBe(1)
+
+    // Toggle off
+    toggleFavorite(session.id, false)
+    const rowOff = getDatabase().prepare('SELECT is_favorite FROM sessions WHERE id = ?').get(session.id) as {
+      is_favorite: number
+    }
+    expect(rowOff.is_favorite).toBe(0)
+  })
+
+  it('includes isFavorite in session summaries', () => {
+    const sessionFav = createSession(projectAId, rootA, 'Fav Session')
+    const sessionNormal = createSession(projectAId, rootA, 'Normal Session')
+
+    toggleFavorite(sessionFav.id, true)
+
+    const sessions = listSessions()
+    const fav = sessions.find((s) => s.id === sessionFav.id)
+    const normal = sessions.find((s) => s.id === sessionNormal.id)
+
+    expect(fav?.isFavorite).toBe(true)
+    expect(normal?.isFavorite).toBe(false)
+  })
+
+  it('sorts favorite sessions before non-favorites in listSessions', () => {
+    const sessionFav = createSession(projectAId, rootA, 'Fav Session')
+    const sessionNormal = createSession(projectAId, rootA, 'Normal Session')
+
+    toggleFavorite(sessionFav.id, true)
+
+    const sessions = listSessions()
+    const favIndex = sessions.findIndex((s) => s.id === sessionFav.id)
+    const normalIndex = sessions.findIndex((s) => s.id === sessionNormal.id)
+
+    expect(favIndex).toBeLessThan(normalIndex)
+  })
+
+  it('sorts favorite sessions before non-favorites in listSessionsByProject', () => {
+    const sessionFav = createSession(projectAId, rootA, 'Fav Session')
+    const sessionNormal = createSession(projectAId, rootA, 'Normal Session')
+
+    toggleFavorite(sessionFav.id, true)
+
+    const { sessions } = listSessionsByProject(projectAId)
+    const favIndex = sessions.findIndex((s) => s.id === sessionFav.id)
+    const normalIndex = sessions.findIndex((s) => s.id === sessionNormal.id)
+
+    expect(favIndex).toBeLessThan(normalIndex)
   })
 })

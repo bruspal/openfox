@@ -50,6 +50,7 @@ import { devServerManager } from './dev-server/manager.js'
 import { getGlobalConfigDir } from '../cli/paths.js'
 import { ProviderRegistry, loadProviderPlugins } from './providers/plugins/index.js'
 import { createPluginRoutes } from './routes/plugins.js'
+import { registerSessionFavoriteRoute } from './routes/session-favorite.js'
 import { logger, setLogLevel } from './utils/logger.js'
 import { VERSION } from '../constants.js'
 import {
@@ -431,6 +432,10 @@ export async function createServerHandle(config: Config): Promise<ServerHandle> 
     }
     res.json({ project })
   })
+
+  const sessionFavoriteRouter = express.Router()
+  registerSessionFavoriteRoute(sessionFavoriteRouter, sessionManager)
+  app.use('/api', sessionFavoriteRouter)
 
   // Branch management endpoints (project-scoped, repo operations)
 

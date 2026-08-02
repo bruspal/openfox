@@ -170,6 +170,12 @@ function runMigrations(db: Database.Database): void {
     db.exec(`ALTER TABLE sessions ADD COLUMN mcp_disabled_servers TEXT`)
   }
 
+  // Migration: Add is_favorite column to sessions table
+  if (!columnNames.includes('is_favorite')) {
+    logger.info('Migrating sessions table: adding is_favorite column')
+    db.exec(`ALTER TABLE sessions ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0`)
+  }
+
   // Create events table for EventStore (single source of truth)
   // Note: EventStore creates this table with its own schema in initSchema()
   // We just ensure the index exists for the event_type column
