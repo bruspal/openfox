@@ -6,6 +6,7 @@ import { Link } from 'wouter'
 export interface DropdownMenuItem {
   label: string | React.ReactNode
   icon?: React.ReactNode
+  labelAction?: React.ReactNode
   onClick?: (event?: React.MouseEvent) => void
   href?: string
   danger?: boolean
@@ -206,53 +207,57 @@ export function DropdownMenu({
     const content = (
       <>
         {item.icon && <span className="w-4 h-4 flex-shrink-0">{item.icon}</span>}
-        {item.label}
+        <span className="min-w-0">{item.label}</span>
       </>
     )
     const showBorder = index !== total - 1
+    const borderClass = showBorder ? 'border-b border-border' : ''
+    const stateClass = item.danger
+      ? 'text-accent-error hover:bg-accent-error/10'
+      : isSelected
+        ? 'bg-accent-primary/20 text-text-primary'
+        : 'hover:bg-bg-tertiary text-text-primary'
+    const baseClass = `px-3 py-2 text-left text-sm flex items-center gap-2 transition-colors ${stateClass}`
 
-    if (item.href) {
-      return (
-        <Link
-          key={baseIndex}
-          href={item.href}
-          onClick={(e) => {
-            item.onClick?.(e)
-            setIsOpen(false)
-          }}
-          onAuxClick={() => setIsOpen(false)}
-          className={`w-full px-3 py-2 text-left text-sm flex items-center gap-2 transition-colors ${
-            item.danger
-              ? 'text-accent-error hover:bg-accent-error/10'
-              : isSelected
-                ? 'bg-accent-primary/20 text-text-primary'
-                : 'hover:bg-bg-tertiary text-text-primary'
-          } ${showBorder ? 'border-b border-border' : ''}`}
-        >
-          {content}
-        </Link>
-      )
-    }
-
-    return (
+    const linkOrButton = item.href ? (
+      <Link
+        href={item.href}
+        onClick={(e) => {
+          item.onClick?.(e)
+          setIsOpen(false)
+        }}
+        onAuxClick={() => setIsOpen(false)}
+        className={`w-full ${baseClass}`}
+      >
+        {content}
+      </Link>
+    ) : (
       <button
-        key={baseIndex}
         onClick={(e) => {
           item.onClick?.(e)
           if (item.closeOnClick !== false) {
             setIsOpen(false)
           }
         }}
-        className={`w-full px-3 py-2 text-left text-sm flex items-center gap-2 transition-colors ${
-          item.danger
-            ? 'text-accent-error hover:bg-accent-error/10'
-            : isSelected
-              ? 'bg-accent-primary/20 text-text-primary'
-              : 'hover:bg-bg-tertiary text-text-primary'
-        } ${showBorder ? 'border-b border-border' : ''}`}
+        className={`w-full ${baseClass}`}
       >
         {content}
       </button>
+    )
+
+    if (item.labelAction) {
+      return (
+        <div key={baseIndex} className={`flex items-center gap-1 pr-1 ${borderClass}`}>
+          {linkOrButton}
+          <span className="flex-shrink-0">{item.labelAction}</span>
+        </div>
+      )
+    }
+
+    return (
+      <div key={baseIndex} className={borderClass}>
+        {linkOrButton}
+      </div>
     )
   }
 
