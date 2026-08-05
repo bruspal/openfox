@@ -23,6 +23,8 @@ import {
   getSession as dbGetSession,
   listSessions as dbListSessions,
   listSessionsByProject as dbListSessionsByProject,
+  listSessionsLimited as dbListSessionsLimited,
+  listHomeSessions as dbListHomeSessions,
   deleteSession as dbDeleteSession,
   updateSessionMetadata,
   updateSessionProvider,
@@ -382,6 +384,14 @@ export class SessionManager {
   }
 
   /**
+   * Lightweight homepage list: the N most recently updated sessions per
+   * project, summaries only (no prompt extraction, no snapshot parsing).
+   */
+  listHomeSessions(sessionsPerProject = 5): SessionSummary[] {
+    return dbListHomeSessions(sessionsPerProject)
+  }
+
+  /**
    * List sessions for a project with pagination.
    */
   listSessionsByProject(projectId: string, limit = 20, offset = 0): { sessions: SessionSummary[]; hasMore: boolean } {
@@ -390,6 +400,15 @@ export class SessionManager {
       return { sessions: [], hasMore: false }
     }
     return dbListSessionsByProject(projectId, limit, offset)
+  }
+
+  /**
+   * Most recently updated sessions across all projects, bounded with
+   * pagination. Used by the legacy global list refresh when a limit is
+   * explicitly requested (the homepage itself uses listHomeSessions).
+   */
+  listSessionsLimited(limit = 20, offset = 0): { sessions: SessionSummary[]; hasMore: boolean } {
+    return dbListSessionsLimited(limit, offset)
   }
 
   /**
@@ -968,21 +987,25 @@ export class SessionManager {
   /**
    * Set current context size (for token tracking).
    * Emits a context.state event with the real promptTokens from the LLM.
+   * Stores promptTokens + completionTokens so the tracked size reflects the
+   * true context occupancy — the last call's output is re-fed into the next
+   * request as an assistant message, so it must count toward the budget.
    * maxTokens comes from providerManager.getCurrentModelContext() - the currently selected model's limit.
    */
-  setCurrentContextSize(sessionId: string, promptTokens: number, subAgentId?: string): void {
+  setCurrentContextSize(sessionId: string, promptTokens: number, completionTokens = 0, subAgentId?: string): void {
     const state = getSessionState(sessionId, this.providerManager.getCurrentModelContext())
     const maxTokens = this.providerManager.getCurrentModelContext()
+    const currentTokens = promptTokens + completionTokens
     const compactionCount = state?.contextState.compactionCount ?? 0
     const dynamicContextChanged = this.getDynamicContextChanged(sessionId)
 
     emitContextState(
       sessionId,
-      promptTokens,
+      currentTokens,
       maxTokens,
       compactionCount,
-      isInDangerZone(promptTokens, maxTokens),
-      canCompact(promptTokens, maxTokens),
+      isInDangerZone(currentTokens, maxTokens),
+      canCompact(currentTokens, maxTokens),
       subAgentId,
       dynamicContextChanged,
     )
@@ -1563,9 +1586,15 @@ export class SessionManager {
     })()
 
     this.switchLocks.set(sessionId, lockPromise)
-    lockPromise.finally(() => {
-      if (this.switchLocks.get(sessionId) === lockPromise) this.switchLocks.delete(sessionId)
-    })
+    // The .finally() chain returns a new promise that propagates the original
+    // rejection. Attach .catch() so the cleanup never surfaces as an unhandled
+    // rejection when lockPromise rejects — the caller already observes the
+    // rejection via the returned promise.
+    lockPromise
+      .finally(() => {
+        if (this.switchLocks.get(sessionId) === lockPromise) this.switchLocks.delete(sessionId)
+      })
+      .catch(() => {})
 
     return lockPromise
   }

@@ -15,9 +15,17 @@
  */
 
 import type Database from 'better-sqlite3'
+import { existsSync, statSync, unlinkSync } from 'node:fs'
 import type { TurnEvent, StoredEvent, SessionSnapshot, SnapshotMessage } from './types.js'
 import { logger } from '../utils/logger.js'
-import { foldSessionState, buildSnapshot } from './folding.js'
+import { foldSessionState, buildSnapshot, trimSnapshotStreamingOutput } from './folding.js'
+import { SETTINGS_KEYS } from '../db/settings.js'
+
+// Rollback backups (.pre-de-dup.bak) are held for 10 days after creation, then
+// auto-pruned on the next migration invocation (startup auto-run or manual
+// script). Long enough to recover from a bad migration, short enough that a
+// 1GB+ copy is not left on disk forever.
+const SNAPSHOT_BACKUP_RETENTION_MS = 10 * 24 * 60 * 60 * 1000
 
 // ============================================================================
 // Types
@@ -955,6 +963,236 @@ export class EventStore {
     logger.info('Orphaned sessions found', { count: orphaned.length, ids: orphaned })
     return orphaned
   }
+
+  /**
+   * Remove an expired rollback backup (`<db>.pre-de-dup.bak`) once it has aged
+   * past the retention window. Best-effort: failures are logged at debug level
+   * and never abort the caller (startup or manual migration).
+   */
+  private pruneExpiredRollbackBackup(): void {
+    const dbName = this.db.name
+    if (!dbName || dbName === ':memory:') return
+
+    const backupPath = `${dbName}.pre-de-dup.bak`
+    try {
+      if (!existsSync(backupPath)) return
+      const ageMs = Date.now() - statSync(backupPath).mtimeMs
+      if (ageMs <= SNAPSHOT_BACKUP_RETENTION_MS) return
+      unlinkSync(backupPath)
+      logger.info('Pruned expired rollback backup', {
+        backupPath,
+        ageDays: Math.round(ageMs / (24 * 60 * 60 * 1000)),
+      })
+    } catch (error) {
+      logger.debug('Could not prune expired rollback backup', {
+        backupPath,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  /**
+   * Rewrite every persisted snapshot with the snapshot streaming
+   * de-duplication applied (see trimSnapshotStreamingOutput). Every finished
+   * tool call's streaming output is dropped — it is never read again once the
+   * call has a result; only pending (in-flight) calls keep their stream.
+   *
+   * Safe by construction: before the first rewrite it creates a rollback copy
+   * of the database (`<db>.pre-de-dup.bak`, only once) — the migration refuses
+   * to rewrite if that backup cannot be created. Expired rollback backups are
+   * auto-pruned (10-day retention) at the start of every invocation. Idempotent:
+   * after a successful run the maintenance flag is set and subsequent runs are
+   * a no-op. Returns a report used for the audit trail.
+   */
+  async migrateSnapshotStreams(): Promise<{
+    skipped: boolean
+    backupPath: string | null
+    scanned: number
+    rewritten: number
+    droppedStreams: number
+    bytesBefore: number
+    bytesAfter: number
+    kept: { pending: number; samples: Array<{ sessionId: string; tool: string }> }
+  }> {
+    // Self-maintenance first: expired rollback backups are cleaned up on every
+    // invocation, including runs skipped by the flag below.
+    this.pruneExpiredRollbackBackup()
+
+    const flag = this.getMaintenanceFlag()
+    if (flag === 'true') {
+      return {
+        skipped: true,
+        backupPath: null,
+        scanned: 0,
+        rewritten: 0,
+        droppedStreams: 0,
+        bytesBefore: 0,
+        bytesAfter: 0,
+        kept: { pending: 0, samples: [] },
+      }
+    }
+
+    // Rollback guarantee: a consistent snapshot of the DB must exist before
+    // any in-place rewrite. In-memory databases (tests) are skipped.
+    const dbName = this.db.name
+    let backupPath: string | null = null
+    if (dbName && dbName !== ':memory:') {
+      backupPath = `${dbName}.pre-de-dup.bak`
+      try {
+        if (!existsSync(backupPath)) {
+          logger.info('Creating rollback backup before snapshot stream de-dup', { backupPath })
+          await this.db.backup(backupPath)
+        }
+      } catch (error) {
+        logger.error('Aborting snapshot stream de-dup: could not create rollback backup', {
+          backupPath,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return {
+          skipped: true,
+          backupPath: null,
+          scanned: 0,
+          rewritten: 0,
+          droppedStreams: 0,
+          bytesBefore: 0,
+          bytesAfter: 0,
+          kept: { pending: 0, samples: [] },
+        }
+      }
+    }
+
+    const rows = this.db
+      .prepare(`SELECT id, session_id, payload FROM events WHERE event_type = 'turn.snapshot'`)
+      .all() as Array<{ id: number; session_id: string; payload: string }>
+
+    const update = this.db.prepare(`UPDATE events SET payload = ? WHERE id = ?`)
+
+    const kept: {
+      pending: number
+      samples: Array<{ sessionId: string; tool: string }>
+    } = { pending: 0, samples: [] }
+
+    let rewritten = 0
+    let droppedStreams = 0
+    let bytesBefore = 0
+    let bytesAfter = 0
+
+    this.db.transaction(() => {
+      for (const row of rows) {
+        bytesBefore += Buffer.byteLength(row.payload)
+        let parsed: SessionSnapshot
+        try {
+          parsed = JSON.parse(row.payload) as SessionSnapshot
+        } catch {
+          bytesAfter += Buffer.byteLength(row.payload)
+          continue
+        }
+
+        // Audit: every retained stream is a pending (in-flight) call — finished
+        // calls always drop their stream, which is dead weight in the snapshot.
+        let snapshotDropped = 0
+        for (const message of parsed.messages ?? []) {
+          for (const tc of message.toolCalls ?? []) {
+            if (!tc.streamingOutput || tc.streamingOutput.length === 0) continue
+            if (tc.result === undefined) {
+              kept.pending++
+              if (kept.samples.length < 20) {
+                kept.samples.push({ sessionId: row.session_id, tool: tc.name })
+              }
+            } else {
+              snapshotDropped++
+            }
+          }
+        }
+
+        if (snapshotDropped === 0) {
+          bytesAfter += Buffer.byteLength(row.payload)
+          continue
+        }
+
+        const { messages, droppedStreams: dropped } = trimSnapshotStreamingOutput(parsed.messages ?? [])
+        if (dropped === 0) {
+          bytesAfter += Buffer.byteLength(row.payload)
+          continue
+        }
+
+        const next = { ...parsed, messages }
+        const nextPayload = JSON.stringify(next)
+        update.run(nextPayload, row.id)
+        rewritten++
+        droppedStreams += dropped
+        bytesAfter += Buffer.byteLength(nextPayload)
+      }
+    })()
+
+    this.setSettingViaDb(SETTINGS_KEYS.MAINTENANCE_SNAPSHOT_STREAMS_MIGRATED, 'true')
+    logger.info('Snapshot stream migration complete', {
+      scanned: rows.length,
+      rewritten,
+      droppedStreams,
+      keptPending: kept.pending,
+      bytesSaved: bytesBefore - bytesAfter,
+    })
+
+    return {
+      skipped: false,
+      backupPath,
+      scanned: rows.length,
+      rewritten,
+      droppedStreams,
+      bytesBefore,
+      bytesAfter,
+      kept,
+    }
+  }
+
+  /**
+   * Read a maintenance flag from the settings table, tolerating databases
+   * without that table (e.g. minimal test fixtures).
+   */
+  private getMaintenanceFlag(): string | null {
+    try {
+      const row = this.db
+        .prepare(`SELECT value FROM settings WHERE key = ?`)
+        .get(SETTINGS_KEYS.MAINTENANCE_SNAPSHOT_STREAMS_MIGRATED) as { value: string } | undefined
+      return row?.value ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Upsert a maintenance flag, tolerating databases without the settings table.
+   */
+  private setSettingViaDb(key: string, value: string): void {
+    try {
+      const now = new Date().toISOString()
+      this.db
+        .prepare(
+          `INSERT INTO settings (key, value, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(key, value, now)
+    } catch {
+      // Settings table may not exist in minimal test fixtures
+    }
+  }
+
+  /**
+   * Collapse the WAL into the main database and truncate the file. Safe to
+   * call anytime; a no-op when the WAL is empty.
+   */
+  checkpointWal(): { busy: number; log: number; checkpointed: number } {
+    const result = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{
+      busy: number
+      log: number
+      checkpointed: number
+    }>
+    const summary = result[0] ?? { busy: 0, log: 0, checkpointed: 0 }
+    logger.debug('WAL checkpoint', summary)
+    return summary
+  }
 }
 
 // ============================================================================
@@ -984,6 +1222,31 @@ export function initEventStore(db: Database.Database): EventStore {
     logger.info('Storage optimized', result)
   }
 
+  // Snapshot stream de-dup, asynchronously (don't block startup). Automatic
+  // and safe: the migration itself creates a rollback backup before its first
+  // rewrite and is idempotent afterwards (settings-flag guarded). Only legacy
+  // snapshots are touched — future snapshots are already lean via the
+  // write-side choke point.
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const report = await eventStoreInstance!.migrateSnapshotStreams()
+        if (!report.skipped) {
+          logger.info('Snapshot stream de-dup (auto)', {
+            rewritten: report.rewritten,
+            droppedStreams: report.droppedStreams,
+            bytesSaved: report.bytesBefore - report.bytesAfter,
+            backupPath: report.backupPath,
+          })
+        }
+      } catch (error) {
+        logger.warn('Snapshot stream de-dup failed at startup', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    })()
+  })
+
   // Consolidate orphaned sessions asynchronously (don't block startup)
   setImmediate(() => {
     try {
@@ -1005,6 +1268,19 @@ export function initEventStore(db: Database.Database): EventStore {
       }
     } catch {
       // Ignore errors during startup consolidation - this is best-effort
+    }
+  })
+
+  // Collapse the WAL into the main database in the background. A large WAL
+  // (e.g. after a bulk write) forces cold reads to walk it; truncating it
+  // after startup keeps first queries fast. No-op when the WAL is empty.
+  setImmediate(() => {
+    try {
+      eventStoreInstance!.checkpointWal()
+    } catch (error) {
+      logger.debug('WAL checkpoint failed at startup', {
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   })
 

@@ -274,7 +274,7 @@ export const Markdown = memo(function Markdown({
 function preprocessForRender(content: string): string {
   let processed = preprocessMarkdown(content)
   processed = fixUnclosedCodeBlocks(processed)
-  return processed
+  return processed.trimEnd()
 }
 
 // Linkify bare http(s) URLs in plain-text content, matching what remark-gfm

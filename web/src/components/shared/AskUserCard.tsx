@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { ToolCall } from '@shared/types.js'
+import { normalizeAskOptions } from '@shared/ask-options.js'
 import { useSessionStore, type PendingQuestion } from '../../stores/session'
 
 interface AskUserCardProps {
@@ -18,7 +19,12 @@ export function AskUserCard({ toolCall }: AskUserCardProps) {
   const question = (toolCall.arguments['question'] as string | undefined) ?? pendingQuestion?.question ?? ''
   const type =
     (toolCall.arguments['type'] as 'text' | 'confirm' | 'choice' | undefined) ?? pendingQuestion?.type ?? 'text'
-  const options = (toolCall.arguments['options'] as string[] | undefined) ?? pendingQuestion?.options ?? undefined
+  // LLM outputs sometimes arrive as `string[]`, sometimes as a string ("A, B"),
+  // sometimes as `[{label, description}]` objects (LLM quirk, see issue #31).
+  // We accept all three: coerce + drop malformed entries. We never render an
+  // object directly as a React child (that crashes React).
+  const rawOptions: unknown = (toolCall.arguments['options'] as unknown) ?? pendingQuestion?.options ?? undefined
+  const choiceOptions = normalizeAskOptions(rawOptions)
 
   const hasResult = toolCall.result !== undefined
   const isPending = pendingQuestion !== undefined && !hasResult
@@ -100,16 +106,19 @@ export function AskUserCard({ toolCall }: AskUserCardProps) {
                   Skip
                 </button>
               </div>
-            ) : type === 'choice' && Array.isArray(options) && options.length > 0 ? (
+            ) : type === 'choice' && choiceOptions !== undefined && choiceOptions.length > 0 ? (
               <>
                 <div className="flex flex-col gap-1.5">
-                  {options.map((option) => (
+                  {choiceOptions.map((opt, index) => (
                     <button
-                      key={option}
-                      onClick={() => handleOptionSelect(option)}
+                      key={index}
+                      onClick={() => handleOptionSelect(opt.value)}
                       className={`${btnBase} text-left w-full bg-bg-tertiary hover:bg-accent-primary/20 text-text-primary border border-border hover:border-accent-primary/50`}
                     >
-                      {option}
+                      <span className="block font-medium">{opt.label}</span>
+                      {opt.description !== undefined && (
+                        <span className="block text-xs text-text-muted mt-0.5">{opt.description}</span>
+                      )}
                     </button>
                   ))}
                 </div>

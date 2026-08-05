@@ -5,6 +5,7 @@ import { ChatMessage } from './ChatMessage'
 import { AssistantMessage } from './AssistantMessage'
 import { SubAgentContainer } from './SubAgentContainer'
 import { FEED_REVEAL_EVENT } from './feed-window'
+import { useDisplaySettings } from '../../stores/settings'
 
 const ITEM_CONTAINMENT_STYLE = { contentVisibility: 'auto', containIntrinsicSize: 'auto 200px' } as const
 const PLACEHOLDER_STYLE = { contentVisibility: 'auto', containIntrinsicSize: '160px', minHeight: '160px' } as const
@@ -46,15 +47,24 @@ export const ChatFeedItems = memo(function ChatFeedItems({
   showWorkflowBars = true,
 }: ChatFeedItemsProps) {
   const totalItems = displayItems.length
+  const { feedVirtualization } = useDisplaySettings()
   // Absolute index of the first mounted item. New items appended at the end
   // (streaming) keep the window stable — only the reveal moves it up.
   const [startIndex, setStartIndex] = useState(() => Math.max(0, totalItems - INITIAL_RENDER_COUNT))
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   const prevItemCountRef = useRef(displayItems.length)
   const userScrolledRef = useRef(false)
+  // Virtualization is opt-in: off by default, the full feed renders as before.
+  const displayStart = feedVirtualization ? startIndex : 0
+  // Only virtualized feeds get content-visibility containment. Off-screen it
+  // freezes element heights at the last-known intrinsic size, so applying it to
+  // dynamically-mutating content (streaming LLM output) leaves stale phantom
+  // gaps below messages. Non-virtualized feeds render at natural height.
+  const itemContainmentStyle = feedVirtualization ? ITEM_CONTAINMENT_STYLE : undefined
 
   // Reset the virtual window when switching sessions.
   useEffect(() => {
+    if (!feedVirtualization) return
     setStartIndex(Math.max(0, displayItems.length - INITIAL_RENDER_COUNT))
     userScrolledRef.current = false
   }, [sessionId])
@@ -66,22 +76,25 @@ export const ChatFeedItems = memo(function ChatFeedItems({
   useEffect(() => {
     const prev = prevItemCountRef.current
     prevItemCountRef.current = displayItems.length
+    if (!feedVirtualization) return
     if (displayItems.length - prev >= BULK_APPEND_THRESHOLD && !userScrolledRef.current) {
       setStartIndex(Math.max(0, displayItems.length - INITIAL_RENDER_COUNT))
     }
-  }, [displayItems.length])
+  }, [displayItems.length, feedVirtualization])
 
   // Clamp when items are removed (truncation, session switch).
   useEffect(() => {
+    if (!feedVirtualization) return
     if (startIndex > 0 && startIndex >= displayItems.length) {
       setStartIndex(Math.max(0, displayItems.length - INITIAL_RENDER_COUNT))
     }
-  }, [displayItems.length, startIndex])
+  }, [displayItems.length, startIndex, feedVirtualization])
 
   // Reveal older items in batches while the sentinel approaches the viewport.
   // The bottom-expanded rootMargin triggers before the user reaches the
   // placeholder region, so scrolling up never exposes gaps.
   useEffect(() => {
+    if (!feedVirtualization) return
     if (startIndex <= 0 || typeof IntersectionObserver === 'undefined') return
     const sentinel = sentinelRef.current
     if (!sentinel) return
@@ -95,7 +108,7 @@ export const ChatFeedItems = memo(function ChatFeedItems({
     )
     observer.observe(sentinel)
     return () => observer.disconnect()
-  }, [startIndex])
+  }, [startIndex, feedVirtualization])
 
   // When the user reaches the very top, keep revealing until everything is
   // mounted — the sentinel can end up below remaining placeholders, out of the
@@ -106,6 +119,7 @@ export const ChatFeedItems = memo(function ChatFeedItems({
   startIndexRef.current = startIndex
 
   useEffect(() => {
+    if (!feedVirtualization) return
     const container = scrollContainerRef?.current
     if (!container) return
     const viewport = container.osInstance?.()?.elements().viewport
@@ -121,22 +135,24 @@ export const ChatFeedItems = memo(function ChatFeedItems({
     }
     viewport.addEventListener('scroll', onScroll, { passive: true })
     return () => viewport.removeEventListener('scroll', onScroll)
-  }, [scrollContainerRef])
+  }, [scrollContainerRef, feedVirtualization])
 
   useEffect(() => {
+    if (!feedVirtualization) return
     if (startIndex <= 0 || !userScrolledRef.current) return
     const container = scrollContainerRef?.current
     const viewport = container?.osInstance?.()?.elements().viewport
     if (viewport && viewport.scrollTop <= 4) {
       setStartIndex((index) => Math.max(0, index - REVEAL_BATCH_SIZE))
     }
-  }, [startIndex, scrollContainerRef])
+  }, [startIndex, scrollContainerRef, feedVirtualization])
 
   // Timeline navigation: reveal up to a target index when asked. This is the
   // only active reveal path — highlightedMessageId (ChatFeedItems) has no
   // non-null caller today, so any future highlight must reveal the target via
   // this event first (see PlanPanel's MessageList usage).
   useEffect(() => {
+    if (!feedVirtualization) return
     const onRevealRequest = (event: Event) => {
       const index = (event as CustomEvent<{ index: number }>).detail?.index
       if (typeof index !== 'number') return
@@ -144,28 +160,28 @@ export const ChatFeedItems = memo(function ChatFeedItems({
     }
     window.addEventListener(FEED_REVEAL_EVENT, onRevealRequest)
     return () => window.removeEventListener(FEED_REVEAL_EVENT, onRevealRequest)
-  }, [])
+  }, [feedVirtualization])
 
-  const visibleItems = displayItems.slice(startIndex)
+  const visibleItems = displayItems.slice(displayStart)
 
   return (
     <>
-      {startIndex > 0 && (
+      {displayStart > 0 && (
         <>
           <div
             className="flex items-center justify-center gap-2 py-3 text-xs text-text-muted"
             data-testid="feed-unmounted-hint"
           >
-            Scroll up to load {startIndex} older item{startIndex !== 1 ? 's' : ''}
+            Scroll up to load {displayStart} older item{displayStart !== 1 ? 's' : ''}
           </div>
-          {Array.from({ length: startIndex }, (_, i) => (
+          {Array.from({ length: displayStart }, (_, i) => (
             <div key={`ph-${i}`} data-item-index={i} data-placeholder style={PLACEHOLDER_STYLE} />
           ))}
           <div ref={sentinelRef} data-testid="feed-sentinel" style={{ height: 1 }} />
         </>
       )}
       {visibleItems.map((item, index) => {
-        const displayIndex = startIndex + index
+        const displayIndex = displayStart + index
         if (item.type === 'context-divider') {
           return (
             <div
@@ -187,7 +203,7 @@ export const ChatFeedItems = memo(function ChatFeedItems({
               key={itemKey(item)}
               data-item-index={displayIndex}
               className="px-2 md:px-4"
-              style={ITEM_CONTAINMENT_STYLE}
+              style={itemContainmentStyle}
             >
               <SubAgentContainer
                 messages={item.messages}
@@ -206,7 +222,7 @@ export const ChatFeedItems = memo(function ChatFeedItems({
               key={itemKey(item)}
               data-item-index={displayIndex}
               className="px-2 md:px-4"
-              style={ITEM_CONTAINMENT_STYLE}
+              style={itemContainmentStyle}
             >
               <AssistantMessage
                 message={message}
@@ -227,12 +243,7 @@ export const ChatFeedItems = memo(function ChatFeedItems({
         }
 
         return (
-          <div
-            key={itemKey(item)}
-            data-item-index={displayIndex}
-            className="px-2 md:px-4"
-            style={ITEM_CONTAINMENT_STYLE}
-          >
+          <div key={itemKey(item)} data-item-index={displayIndex} className="px-2 md:px-4" style={itemContainmentStyle}>
             <div
               data-message-id={message.id}
               className={highlightedMessageId === message.id ? 'rounded animate-highlight-fade' : undefined}

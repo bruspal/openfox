@@ -5,6 +5,7 @@ import { flushSync } from 'react-dom'
 import { act } from 'react'
 import { ChatFeedItems } from './ChatFeedItems'
 import { FEED_REVEAL_EVENT } from './feed-window'
+import { SETTINGS_KEYS, useSettingsStore } from '../../stores/settings'
 import type { DisplayItem } from './groupMessages'
 
 class MockIntersectionObserver {
@@ -97,8 +98,70 @@ describe('ChatFeedItems stable keys', () => {
   })
 })
 
+describe('ChatFeedItems default (virtualization off)', () => {
+  beforeEach(() => {
+    useSettingsStore.setState({ settings: {} })
+  })
+
+  it('mounts every item with no placeholders or sentinel by default', () => {
+    const items = Array.from({ length: 70 }, (_, i) => msg(`m${i}`, 'user', `Content ${i}`))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
+
+    expect(container.querySelector('[data-message-id="m0"]')).toBeTruthy()
+    expect(container.querySelector('[data-message-id="m69"]')).toBeTruthy()
+    expect(container.querySelectorAll('.feed-item')).toHaveLength(70)
+    expect(container.querySelector('[data-placeholder]')).toBeNull()
+    expect(container.querySelector('[data-testid="feed-sentinel"]')).toBeNull()
+    expect(container.querySelector('[data-testid="feed-unmounted-hint"]')).toBeNull()
+  })
+})
+
+describe('ChatFeedItems containment styling', () => {
+  it('applies no content-visibility containment to mounted items when virtualization is off', () => {
+    useSettingsStore.setState({ settings: {} })
+    const items = [msg('a', 'user', 'Alpha'), msg('b', 'assistant', 'Beta')]
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
+
+    const wrappers = container.querySelectorAll<HTMLElement>('[data-item-index]:not([data-placeholder])')
+    expect(wrappers.length).toBeGreaterThan(0)
+    for (const wrapper of wrappers) {
+      expect(wrapper.style.getPropertyValue('content-visibility')).toBe('')
+      expect(wrapper.style.getPropertyValue('contain-intrinsic-size')).toBe('')
+    }
+  })
+
+  it('applies content-visibility containment to mounted items when virtualization is on', () => {
+    useSettingsStore.setState({ settings: { [SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION]: 'true' } })
+    const items = Array.from({ length: 34 }, (_, i) => msg(`m${i}`, 'user', `Content ${i}`))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+
+    flushSync(() => root.render(<ChatFeedItems displayItems={items} />))
+
+    const wrappers = container.querySelectorAll<HTMLElement>('[data-item-index]:not([data-placeholder])')
+    expect(wrappers.length).toBeGreaterThan(0)
+    for (const wrapper of wrappers) {
+      expect(wrapper.style.getPropertyValue('content-visibility')).toBe('auto')
+      expect(wrapper.style.getPropertyValue('contain-intrinsic-size')).toBe('auto 200px')
+    }
+  })
+})
+
 describe('ChatFeedItems progressive rendering', () => {
   beforeEach(() => {
+    useSettingsStore.setState({ settings: { [SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION]: 'true' } })
     MockIntersectionObserver.instances = []
     vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
   })

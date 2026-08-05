@@ -67,6 +67,33 @@ export const useAutoScroll = (
     [setActive],
   )
 
+  // A freshly loaded session must anchor to the bottom. Load-time races — a
+  // stray scroll event firing at the top before the first bottom-anchor — used
+  // to disable autoscroll permanently, stranding the feed at the top. Re-arm on
+  // every session change and pin to the bottom once the content settles.
+  const sessionAnchorRafRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!session?.id) return
+    if (sessionAnchorRafRef.current !== null) {
+      cancelAnimationFrame(sessionAnchorRafRef.current)
+      sessionAnchorRafRef.current = null
+    }
+    setActive(true)
+    lastFollowRef.current = Date.now()
+    sessionAnchorRafRef.current = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        scroll_to_bottom()
+        sessionAnchorRafRef.current = null
+      })
+    })
+    return () => {
+      if (sessionAnchorRafRef.current !== null) {
+        cancelAnimationFrame(sessionAnchorRafRef.current)
+        sessionAnchorRafRef.current = null
+      }
+    }
+  }, [session?.id, setActive, scroll_to_bottom])
+
   useEffect(() => {
     const scroller = getEffectiveScroller()
     if (!scroller) return

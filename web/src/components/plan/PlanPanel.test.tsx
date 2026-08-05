@@ -4,12 +4,14 @@ import { act } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createRoot } from 'react-dom/client'
 
+const { mockHiddenCountBox } = vi.hoisted(() => ({ mockHiddenCountBox: { value: 0 } }))
+
 vi.mock('../../stores/session', () => ({
   useSessionStore: (selector: (state: unknown) => unknown) =>
     selector({
       currentSession: { id: 's1', criteria: [], metadata: {}, metadataEntries: {} },
       messages: [],
-      hiddenCount: 0,
+      hiddenCount: mockHiddenCountBox.value,
       queuedMessages: [],
       abortInProgress: false,
       restoredInput: null,
@@ -190,6 +192,23 @@ describe('PlanPanel — server-side truncation integration', () => {
       <PlanPanel rawMessages={[{ id: 'msg-1', role: 'user', content: 'Hi', timestamp: new Date().toISOString() }]} />,
     )
     expect(html).not.toContain('older items hidden')
+  })
+
+  it('[AUTOMATED] surfaces the server-reported store hiddenCount when no prop is passed', () => {
+    mockHiddenCountBox.value = 7
+    const html = renderToStaticMarkup(
+      <PlanPanel
+        rawMessages={Array.from({ length: 335 }, (_, i) => ({
+          id: `msg-${i + 1}`,
+          role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+          content: `Message ${i + 1}`,
+          timestamp: new Date().toISOString(),
+        }))}
+      />,
+    )
+    // The server already trimmed the payload to 300, so the client-side guess
+    // (335 - 300 = 35) must NOT override the authoritative store value (7).
+    expect(html).toContain('7 older items hidden')
   })
 })
 

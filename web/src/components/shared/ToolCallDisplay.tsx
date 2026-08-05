@@ -17,8 +17,7 @@ import { useSessionStore, type PendingPathConfirmation } from '../../stores/sess
 import { useSettingsStore, SETTINGS_KEYS } from '../../stores/settings'
 import { buildEditorUrl } from '../../lib/editor-link'
 import { detectRemoteExecution } from '../../lib/remote-execution'
-
-type ToolStatus = 'pending' | 'success' | 'error' | 'interrupted'
+import type { ToolStatus } from '../../lib/toolStatus'
 
 interface StreamingChunk {
   stream: 'stdout' | 'stderr'

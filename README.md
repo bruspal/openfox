@@ -77,6 +77,7 @@ openfox provider remove   # Remove provider
 
 - **Plan → Builder Workflow**: Interactive task breakdown followed by autonomous implementation
 - **Contract-Driven Execution**: Acceptance criteria serve as immutable contract
+- **Workflows**: Declarative multi-step pipelines (agent turns, sub-agents, shell commands, user gates) with conditional transitions. File format and authoring reference: [docs/WORKFLOWS.md](docs/WORKFLOWS.md)
 - **Iterative Verification**: Agent loops until all criteria pass
 - **LSP Integration**: Immediate feedback on code validity
 - **Real-Time Metrics**: Prefill time, generation speed, context usage
@@ -139,6 +140,7 @@ _Vision Fallback — Image processing configuration_
 | `OPENFOX_LLM_IDLE_TIMEOUT`           | `300000`                   | LLM stream idle timeout in ms                                   |
 | `OPENFOX_PORT`                       | `10369`                    | Server listen port                                              |
 | `OPENFOX_HOST`                       | `127.0.0.1`                | Server bind host                                                |
+| `OPENFOX_PUBLIC_URL`                 | —                          | Public origin used to build the MCP OAuth redirect URI          |
 | `OPENFOX_WORKDIR`                    | `cwd`                      | Working directory                                               |
 | `OPENFOX_DB_PATH`                    | `./openfox.db`             | SQLite database path                                            |
 | `OPENFOX_LOG_LEVEL`                  | `info`                     | Log level: `debug`, `info`, `warn`, `error`                     |

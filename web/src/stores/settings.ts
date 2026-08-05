@@ -24,6 +24,7 @@ export const SETTINGS_KEYS = {
   DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS: 'display.useNativeScrollbarsCodeBlocks',
   DISPLAY_COLLAPSE_LARGE_TOOL_CALLS: 'display.collapseLargeToolCalls',
   DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING: 'display.deferCodeHighlightWhileStreaming',
+  DISPLAY_FEED_VIRTUALIZATION: 'display.feedVirtualization',
   LLM_DYNAMIC_SYSTEM_PROMPT: 'llm.dynamicSystemPrompt',
   CACHE_WARMING: 'cache.warming',
   KEYBINDINGS: 'keybindings',
@@ -79,6 +80,7 @@ export const DISPLAY_SETTINGS_KEYS = [
   SETTINGS_KEYS.DISPLAY_USE_NATIVE_SCROLLBARS_CODE_BLOCKS,
   SETTINGS_KEYS.DISPLAY_COLLAPSE_LARGE_TOOL_CALLS,
   SETTINGS_KEYS.DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING,
+  SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION,
 ] as const
 
 export function useDisplaySettings() {
@@ -109,6 +111,8 @@ export function useDisplaySettings() {
       useSettingsStore(
         (state) => state.settings[SETTINGS_KEYS.DISPLAY_DEFER_CODE_HIGHLIGHT_WHILE_STREAMING] ?? 'false',
       ) === 'true',
+    feedVirtualization:
+      useSettingsStore((state) => state.settings[SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION] ?? 'false') === 'true',
   }
 }
 

@@ -373,7 +373,12 @@ export async function runTopLevelAgentLoop(
       previousContextTokens,
       result.modelParams,
     )
-    sessionManager.setCurrentContextSize(sessionId, result.usage.promptTokens, config.subAgentMetadata?.subAgentId)
+    sessionManager.setCurrentContextSize(
+      sessionId,
+      result.usage.promptTokens,
+      result.usage.completionTokens,
+      config.subAgentMetadata?.subAgentId,
+    )
 
     // Check compaction threshold with fresh promptTokens from LLM.
     // When exceeded, append compaction prompt and let the next iteration

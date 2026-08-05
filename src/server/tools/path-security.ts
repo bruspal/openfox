@@ -4,6 +4,7 @@ import { homedir, tmpdir } from 'node:os'
 import type { ServerMessage } from '../../shared/protocol.js'
 import { createChatPathConfirmationMessage } from '../ws/protocol.js'
 import { getEventStore } from '../events/index.js'
+import { getPlatformShell } from '../utils/platform.js'
 
 // ===========================================================================
 // Constants
@@ -225,6 +226,22 @@ function looksLikeRegex(str: string): boolean {
 const isWindows = () => process.platform === 'win32'
 
 /**
+ * True when the active shell speaks POSIX paths: any Unix shell, or Git Bash on
+ * Windows. Drives whether `/etc/passwd`-style absolute paths are extracted.
+ * Gating on the *shell* (not process.platform) is what closes the Git Bash
+ * bypass: with cmd.exe/PowerShell `/s` `/i` are switches, but under Git Bash a
+ * leading `/` is a real absolute path that must trigger the sandbox confirmation.
+ */
+function usesPosixPaths(): boolean {
+  if (process.platform !== 'win32') return true
+  // Host basename() is POSIX on Unix: a Windows shell path like
+  // `C:\Program Files\Git\bin\bash.exe` has no `/` to split on, so the whole
+  // string survives as one segment and the regex never matches. Parse the
+  // shell's own (Windows) separator instead.
+  return /^(?:ba|z|)sh(?:\.exe)?$/i.test(win32.basename(getPlatformShell().command))
+}
+
+/**
  * Check if a string is a Windows drive-letter absolute path (C:\... or C:/...).
  */
 function isWindowsAbsolutePath(str: string): boolean {
@@ -235,9 +252,20 @@ function isWindowsAbsolutePath(str: string): boolean {
  * Normalize an extracted path according to its own shape, not the host
  * platform: host normalize() would turn "/var/log" into "\var\log" on
  * Windows, breaking comparisons and the SAFE_PATHS lookup.
+ *
+ * On Windows under Git Bash, the MSYS form `/c/Users/...` denotes the real
+ * drive path `C:\Users\...`. Translating it lets the sandbox comparison run on
+ * a real Windows path (otherwise it would be neither inside nor outside the
+ * workdir, and the displayed path would be meaningless). `/tmp`, `/usr`, … are
+ * left as-is: they map inside the Git install and are outside the workdir
+ * regardless. UNC (`\\server\share`) and `/cygdrive/` are out of scope.
  */
 function normalizeExtracted(path: string): string {
-  return isWindowsAbsolutePath(path) ? win32.normalize(path) : posix.normalize(path)
+  if (isWindowsAbsolutePath(path)) return win32.normalize(path)
+  if (isWindows() && /^\/[A-Za-z]\//.test(path)) {
+    return win32.normalize(`${path[1]!.toUpperCase()}:\\${path.slice(3)}`)
+  }
+  return posix.normalize(path)
 }
 
 /**
@@ -265,6 +293,9 @@ export function extractAbsolutePathsFromCommand(command: string): string[] {
 
   const paths: string[] = []
   const home = homedir()
+  // Shell type can't change mid-command — compute once. usesPosixPaths() reads
+  // the active shell setting (a DB query), so avoid calling it per token.
+  const posixShell = usesPosixPaths()
 
   // Remove URL schemes to avoid false positives
   // Replace http://, https://, ftp://, file:// with markers
@@ -330,7 +361,7 @@ export function extractAbsolutePathsFromCommand(command: string): string[] {
       if (!isSafePath(resolved)) {
         paths.push(resolved)
       }
-    } else if (!isWindows() && content.startsWith('/')) {
+    } else if (posixShell && content.startsWith('/')) {
       const resolved = normalizeExtracted(content)
       if (!isSafePath(resolved)) {
         paths.push(resolved)
@@ -350,9 +381,13 @@ export function extractAbsolutePathsFromCommand(command: string): string[] {
   // Pattern 3: Unquoted absolute paths
   // Strategy: boundary + broad character class + predicate pipeline.
   // Each predicate is a small, named function with a single responsibility.
+  //
+  // The two branches are independent (not if/else): on Windows under Git Bash
+  // BOTH drive-letter paths and POSIX paths are valid and must be extracted.
+  // On Unix only the POSIX branch runs; under cmd.exe/PowerShell only the
+  // drive-letter branch runs (so `/s`, `/i` stay treated as switches).
   if (isWindows()) {
-    // On Windows (cmd.exe), "/token" is a command switch (dir /s, findstr /i),
-    // not a path. Only drive-letter paths (C:\... or C:/...) are absolute paths.
+    // Drive-letter paths (C:\... or C:/...) are absolute on every Windows shell.
     // looksLikeRegex is skipped: backslashes are separators here, and the
     // drive-letter prefix is diagnostic enough.
     const winAbsolutePattern = /(?:^|[\s=(])([A-Za-z]:[\\/][^\s"'|&;<>`()]+)/g
@@ -364,7 +399,8 @@ export function extractAbsolutePathsFromCommand(command: string): string[] {
         paths.push(resolved)
       }
     }
-  } else {
+  }
+  if (posixShell) {
     const absolutePattern = /(?:^|[\s=(])(\/[^\s"'|&;<>`()]+)/g
     while ((match = absolutePattern.exec(sanitized)) !== null) {
       const candidate = match[1]!
@@ -444,13 +480,19 @@ export function extractSensitivePathsFromCommand(command: string): string[] {
   return [...new Set(paths)]
 }
 
+/** Windows reserved device names — valid from any directory (C:\project\NUL). */
+const WINDOWS_DEVICE_NAMES = new Set(['nul', 'con', 'prn', 'aux'])
+
 /**
  * Check if a path is a "safe" device path that doesn't need confirmation
  */
 function isSafePath(path: string): boolean {
   // SAFE_PATHS entries are Unix device paths — posix semantics regardless of host.
   const normalized = posix.normalize(path)
-  return SAFE_PATHS.has(normalized)
+  if (SAFE_PATHS.has(normalized)) return true
+  if (!isWindows()) return false
+  // Device names resolve regardless of the directory prefix, and \\.\NUL / \\?\NUL too.
+  return WINDOWS_DEVICE_NAMES.has(win32.basename(path.replace(/^\\\\[.?]\\/, '')).toLowerCase())
 }
 
 // ===========================================================================
@@ -524,15 +566,38 @@ const DANGEROUS_PATTERNS = [
   /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;/,
 ]
 
+// Windows equivalents (cmd.exe / PowerShell are case-insensitive). Kept apart
+// from DANGEROUS_PATTERNS so they only run on Windows: on Unix they would flag
+// innocent searches for Windows syntax (e.g. `grep -r "format d:" docs`).
+// Switches are matched before the operand only: cmd also accepts them after
+// it ("del *.log /s"), but scanning past the operand makes every command
+// mentioning "del" or "format" a candidate, so that form is knowingly missed.
+const WINDOWS_DANGEROUS_PATTERNS = [
+  /\b(?:rd|rmdir)\s+(?:\/[a-z]\s+)*\/s\b/i, // rd /s /q <dir>
+  /\bdel\s+(?:\/[a-z]\s+)*\/s\b/i, // del /f /s /q <pattern>
+  // The operand is a bare drive ("D:", "D:\"), never a file path — that is what
+  // keeps "npm run format -- C:\src\x.ts" out of the dangerous bucket.
+  /\bformat\s+(?:\/\S+\s+)*[a-z]:\\?(?=\s|$)/i, // format D: / format /q D: / format /fs:NTFS D:
+  /\bRemove-Item\b(?=[^|;]*-Recurse\b)(?=[^|;]*-Force\b)/i, // PowerShell recursive force delete (flag order-independent)
+  /\brunas\b/i, // sudo equivalent
+  /\bStart-Process\b[^|;]*-Verb\s+RunAs\b/i, // sudo equivalent (PowerShell)
+  /\bicacls\b[^|;]*\/grant\b[^|;]*Everyone/i, // chmod 777 equivalent
+  /\bdiskpart\b/i, // raw disk write, dd/mkfs equivalent
+]
+
 export function extractDangerousPatterns(command: string): string[] {
+  const patterns = isWindows() ? [...DANGEROUS_PATTERNS, ...WINDOWS_DANGEROUS_PATTERNS] : DANGEROUS_PATTERNS
   const dangerous: string[] = []
-  for (const pattern of DANGEROUS_PATTERNS) {
+  for (const pattern of patterns) {
     if (pattern.test(command)) {
       dangerous.push(pattern.source)
     }
   }
   return dangerous
 }
+
+/** Git subcommands where `-n` is the documented shorthand for `--no-verify`. */
+const GIT_N_NO_VERIFY_SUBCOMMANDS = new Set(['commit', 'am'])
 
 export function extractGitNoVerify(command: string): boolean {
   const subCommands = command.split(/\s*(?:&&|\|\||\||;)\s*/)
@@ -542,9 +607,13 @@ export function extractGitNoVerify(command: string): boolean {
     const subCmd = parts[gitIndex + 1]
     if (gitIndex >= 0 && subCmd && !subCmd.startsWith('-')) {
       const gitArgs = parts.slice(gitIndex + 2)
-      if (gitArgs.some((a) => a === '--no-verify' || a === '-n')) {
-        return true
-      }
+      // Explicit --no-verify always counts: it bypasses hooks on any
+      // supporting subcommand (commit, am, rebase, merge, push, ...).
+      if (gitArgs.includes('--no-verify')) return true
+      // `-n` is only `--no-verify` for commit/am. Elsewhere git assigns it a
+      // harmless meaning (--dry-run, --no-stat, line numbers, commit-count
+      // limits, --no-tags, ...), so flagging it is a false positive.
+      if (GIT_N_NO_VERIFY_SUBCOMMANDS.has(subCmd) && gitArgs.includes('-n')) return true
     }
   }
   return false

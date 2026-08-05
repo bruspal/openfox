@@ -48,4 +48,5 @@ export {
   foldWaitingWorkflow,
   buildSnapshot,
   buildSnapshotFromSessionState,
+  trimSnapshotStreamingOutput,
 } from './fold-state.js'

@@ -3,6 +3,7 @@ import { describe, expect, it, afterEach, vi } from 'vitest'
 import { act } from 'react'
 import { renderHook } from '@testing-library/react'
 import { useAutoScroll, scrollbarGestureToEnable, DRAG_MAGNET_GAP_PX } from './useAutoScroll'
+import type { Session } from '@shared/types.js'
 
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -71,6 +72,37 @@ describe('scrollbarGestureToEnable', () => {
 })
 
 describe('useAutoScroll', () => {
+  it('re-anchors to the bottom on session load even when a stray scroll event fires at the top first', async () => {
+    // Fresh loads start at the top (scrollTop 0) with a tall feed; a stray
+    // scroll event can fire before the first bottom-anchor, which used to
+    // disable autoscroll permanently and strand the feed at the top.
+    const scroller = makeScroller()
+    scroller.el.scrollTop = 0
+    const hook = renderHook<ReturnType<typeof useAutoScroll>, { id: string | null }>(
+      (props) =>
+        useAutoScroll(
+          { current: scroller.el },
+          (props.id ? { id: props.id } : null) as Session | null,
+          () => scroller.el,
+        ),
+      { initialProps: { id: null } },
+    )
+    cleanups.push(() => {
+      hook.unmount()
+      scroller.el.remove()
+    })
+
+    // Session loads; a stray scroll event lands at the top before any anchor.
+    scroller.el.scrollTop = 0
+    act(() => scroller.el.dispatchEvent(new Event('scroll')))
+    act(() => hook.rerender({ id: 'session-1' }))
+    await flushRaf()
+    await flushRaf()
+
+    expect(hook.result.current.isAutoScrollActive).toBe(true)
+    expect(scroller.el.scrollTop).toBe(scroller.metrics.scrollHeight - scroller.metrics.offsetHeight)
+  })
+
   it('keeps auto-scroll on when a programmatic jump is followed by a late scroll event after content grew', () => {
     const { el, metrics, result } = setup()
     expect(result.current.isAutoScrollActive).toBe(true)

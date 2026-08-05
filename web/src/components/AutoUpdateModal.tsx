@@ -1,14 +1,30 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Modal } from './shared/Modal'
 import { authFetch } from '../lib/api'
 import { appUrl } from '../lib/basePath'
 
-type ModalState = 'ready' | 'updating' | 'restarting' | 'complete' | 'failed'
+type ModalState = 'ready' | 'updating' | 'complete' | 'failed' | 'restarting' | 'restartFailed'
 
 interface AutoUpdateModalProps {
   isOpen: boolean
   onClose: () => void
   versionInfo: { current: string; latest: string } | null
+}
+
+const POLL_INTERVAL_MS = 1_000
+const POLL_TIMEOUT_MS = 30_000
+
+function FallbackPanel({ message, command, hint }: { message: string | null; command: string; hint: string }) {
+  return (
+    <div className="flex flex-col gap-3 mt-2">
+      <div className="flex items-center gap-2 px-3 py-2 bg-accent-danger/10 border border-accent-danger/30 rounded text-xs">
+        <span>⚠️</span>
+        <p className="text-text-secondary">{message}</p>
+      </div>
+      <div className="bg-bg-tertiary rounded px-3 py-2 text-xs font-mono text-text-secondary">{command}</div>
+      <p className="text-xs text-text-muted">{hint}</p>
+    </div>
+  )
 }
 
 export function AutoUpdateModal({ isOpen, onClose, versionInfo }: AutoUpdateModalProps) {
@@ -17,17 +33,46 @@ export function AutoUpdateModal({ isOpen, onClose, versionInfo }: AutoUpdateModa
   const [modalVersionInfo, setModalVersionInfo] = useState(versionInfo)
   const [updatedVersion, setUpdatedVersion] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [restartAvailable, setRestartAvailable] = useState(false)
+  const [serviceMode, setServiceMode] = useState(false)
+  const [autoRestart, setAutoRestart] = useState(false)
+  // Mirrors autoRestart for the update success handler: the decision must be
+  // read when the POST resolves (the user may toggle mid-download), not from a
+  // stale useCallback closure.
+  const autoRestartRef = useRef(false)
   const isDev = import.meta.env.DEV
 
-  // Auto-fetch only once when modal opens and no versionInfo provided
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pollStartedAtRef = useRef<number | null>(null)
+  const mountedRef = useRef(true)
+  // Latest versionInfo prop, readable from the open-time effect without making
+  // it a dependency (the prop is recreated on parent renders; refetching on
+  // identity change would be wasted /check traffic).
+  const versionInfoRef = useRef(versionInfo)
+  versionInfoRef.current = versionInfo
+
+  // Fetch /check once per open: learns service-mode (checkbox visibility) and,
+  // when no versionInfo was provided, the current/latest versions. /check is
+  // public and cached server-side, and service-ness is a stable server property.
   useEffect(() => {
-    if (!isOpen || versionInfo) return
-    fetch(appUrl('/api/auto-update/check'))
-      .then((res) => res.json())
-      .then((data) => {
-        setModalVersionInfo({ current: data.current, latest: data.latest })
-      })
-      .catch(() => {})
+    if (!isOpen) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch(appUrl('/api/auto-update/check'))
+        const data = (await res.json()) as { current?: string; latest?: string; isService?: boolean }
+        if (cancelled) return
+        setServiceMode(Boolean(data.isService))
+        if (!versionInfoRef.current && data.current && data.latest) {
+          setModalVersionInfo({ current: data.current, latest: data.latest })
+        }
+      } catch {
+        if (!cancelled) setServiceMode(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [isOpen])
 
   useEffect(() => {
@@ -37,6 +82,101 @@ export function AutoUpdateModal({ isOpen, onClose, versionInfo }: AutoUpdateModa
     }, 400)
     return () => clearInterval(dots)
   }, [isOpen, state])
+
+  const clearPoll = useCallback(() => {
+    if (pollTimerRef.current !== null) {
+      clearTimeout(pollTimerRef.current)
+      pollTimerRef.current = null
+    }
+    pollStartedAtRef.current = null
+  }, [])
+
+  const enterRestartFailed = useCallback((message: string) => {
+    setErrorMessage(message)
+    setState('restartFailed')
+  }, [])
+
+  const toggleAutoRestart = useCallback((checked: boolean) => {
+    autoRestartRef.current = checked
+    setAutoRestart(checked)
+  }, [])
+
+  // Announce a successfully applied update. Deliberately deferred until the
+  // new version is confirmed running (right before reload) so the success
+  // banner/changelog never fire for a version that is not live yet.
+  const markUpdateApplied = useCallback((version: string) => {
+    localStorage.setItem('openfox_updated_to', version)
+    localStorage.setItem('update_pending', 'true')
+  }, [])
+
+  // Shared restart + confirmation routine used by both the manual
+  // "Restart OpenFox now" button and the auto-restart checkbox path.
+  const restartAndPoll = useCallback(
+    async (installedVersion: string) => {
+      setState('restarting')
+      setErrorMessage(null)
+      clearPoll()
+
+      // Best-effort trigger: the server may go down before responding.
+      try {
+        await authFetch('/api/auto-update/restart', { method: 'POST' })
+      } catch {
+        // Ignore: the server is expected to be unreachable momentarily during restart.
+      }
+
+      if (!mountedRef.current) return
+
+      pollStartedAtRef.current = Date.now()
+
+      const tick = async (): Promise<void> => {
+        if (!mountedRef.current) {
+          clearPoll()
+          return
+        }
+
+        const startedAt = pollStartedAtRef.current
+        if (startedAt !== null && Date.now() - startedAt >= POLL_TIMEOUT_MS) {
+          clearPoll()
+          enterRestartFailed(
+            'OpenFox could not be reached after restart within 30 seconds. Please restart OpenFox manually.',
+          )
+          return
+        }
+
+        try {
+          // Intentionally raw `fetch` (not `authFetch`): during the restart window
+          // the server may be down or the session token may have been invalidated
+          // by the reload, so we don't want to fail the poll on auth/transport
+          // errors. /api/auto-update/check is in the publicPaths allowlist.
+          const res = await fetch(appUrl('/api/auto-update/check?force=true'))
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+          const data = (await res.json()) as { current: string; latest: string }
+          if (data.current === installedVersion) {
+            clearPoll()
+            markUpdateApplied(installedVersion)
+            window.location.reload()
+            return
+          }
+        } catch {
+          // Tolerate network errors during the restart window.
+        }
+
+        if (!mountedRef.current) {
+          clearPoll()
+          return
+        }
+
+        pollTimerRef.current = setTimeout(() => {
+          void tick()
+        }, POLL_INTERVAL_MS)
+      }
+
+      pollTimerRef.current = setTimeout(() => {
+        void tick()
+      }, POLL_INTERVAL_MS)
+    },
+    [clearPoll, enterRestartFailed, markUpdateApplied],
+  )
 
   const handleUpdate = useCallback(async () => {
     setState('updating')
@@ -49,13 +189,11 @@ export function AutoUpdateModal({ isOpen, onClose, versionInfo }: AutoUpdateModa
       if (data.success) {
         const version = data.version ?? 'unknown'
         setUpdatedVersion(version)
-        localStorage.setItem('openfox_updated_to', version)
-        localStorage.setItem('update_pending', 'true')
-
-        if (data.isService) {
-          setState('restarting')
-          await authFetch('/api/auto-update/restart', { method: 'POST' }).catch(() => {})
-          setTimeout(() => window.location.reload(), 5_000)
+        setRestartAvailable(Boolean(data.isService))
+        // Read the checkbox at completion time — the user may have toggled it
+        // while the download was in flight.
+        if (autoRestartRef.current && data.isService) {
+          void restartAndPoll(version)
         } else {
           setState('complete')
         }
@@ -67,16 +205,38 @@ export function AutoUpdateModal({ isOpen, onClose, versionInfo }: AutoUpdateModa
       setErrorMessage(err instanceof Error ? err.message : 'Update request failed')
       setState('failed')
     }
-  }, [])
+  }, [restartAndPoll])
+
+  const handleRestartNow = useCallback(() => {
+    const installedVersion = updatedVersion ?? modalVersionInfo?.latest ?? null
+    if (!installedVersion) {
+      enterRestartFailed('Installed version unknown; cannot verify restart.')
+      return
+    }
+    void restartAndPoll(installedVersion)
+  }, [updatedVersion, modalVersionInfo, enterRestartFailed, restartAndPoll])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      clearPoll()
+    }
+  }, [clearPoll])
 
   useEffect(() => {
     if (isOpen) {
-      setState('ready')
       setProgressDots('')
+      clearPoll()
+      setState('ready')
       setUpdatedVersion(null)
       setErrorMessage(null)
+      setRestartAvailable(false)
+      setServiceMode(false)
+      toggleAutoRestart(false)
     }
-  }, [isOpen])
+  }, [isOpen, clearPoll, toggleAutoRestart])
 
   const canClose = state !== 'updating' && state !== 'restarting'
 
@@ -90,11 +250,15 @@ export function AutoUpdateModal({ isOpen, onClose, versionInfo }: AutoUpdateModa
   const title =
     state === 'failed'
       ? 'Update Failed'
-      : state === 'complete' || state === 'restarting'
-        ? 'Update Complete'
-        : isDev
-          ? 'New OpenFox (dev) version available'
-          : 'New OpenFox version available'
+      : state === 'restarting'
+        ? 'Restarting…'
+        : state === 'complete'
+          ? 'Update Complete'
+          : state === 'restartFailed'
+            ? 'Restart Not Confirmed'
+            : isDev
+              ? 'New OpenFox (dev) version available'
+              : 'New OpenFox version available'
 
   return (
     <Modal
@@ -135,20 +299,27 @@ export function AutoUpdateModal({ isOpen, onClose, versionInfo }: AutoUpdateModa
           <div className="flex flex-col gap-3 mt-2">
             <div className="bg-bg-tertiary rounded px-3 py-2 text-xs text-text-secondary">
               OpenFox has been updated to v{updatedVersion ?? modalVersionInfo?.latest}.
-              {' Please restart OpenFox to use the new version.'}
+              {restartAvailable
+                ? ' Click "Restart OpenFox now" to apply the update.'
+                : ' Please restart OpenFox to use the new version.'}
             </div>
           </div>
         )}
 
         {state === 'failed' && (
-          <div className="flex flex-col gap-3 mt-2">
-            <div className="flex items-center gap-2 px-3 py-2 bg-accent-danger/10 border border-accent-danger/30 rounded text-xs">
-              <span>⚠️</span>
-              <p className="text-text-secondary">{errorMessage}</p>
-            </div>
-            <div className="bg-bg-tertiary rounded px-3 py-2 text-xs font-mono text-text-secondary">openfox update</div>
-            <p className="text-xs text-text-muted">Run this command in your terminal to complete the update.</p>
-          </div>
+          <FallbackPanel
+            message={errorMessage}
+            command="openfox update"
+            hint="Run this command in your terminal to complete the update."
+          />
+        )}
+
+        {state === 'restartFailed' && (
+          <FallbackPanel
+            message={errorMessage}
+            command="openfox service restart"
+            hint="Run this command in your terminal to restart OpenFox."
+          />
         )}
       </div>
 
@@ -161,7 +332,42 @@ export function AutoUpdateModal({ isOpen, onClose, versionInfo }: AutoUpdateModa
         </button>
       )}
 
-      {(state === 'complete' || state === 'failed') && (
+      {/* Service installs can opt into an automatic restart; the checkbox stays
+          live through the download so the decision can be made mid-update. */}
+      {(state === 'ready' || state === 'updating') && serviceMode && (
+        <label className="flex items-center justify-center gap-2 text-xs text-text-muted cursor-pointer select-none mt-2">
+          <input type="checkbox" checked={autoRestart} onChange={(e) => toggleAutoRestart(e.target.checked)} />
+          Auto-restart once update is done
+        </label>
+      )}
+
+      {state === 'complete' && restartAvailable && (
+        <div className="flex flex-col gap-2 mt-2">
+          <button
+            onClick={handleRestartNow}
+            className="w-full px-3 py-2 text-sm rounded bg-accent-primary hover:brightness-110 transition-all text-white font-medium"
+          >
+            Restart OpenFox now
+          </button>
+          <button
+            onClick={onClose}
+            className="w-full px-3 py-2 text-sm rounded bg-bg-tertiary hover:bg-bg-secondary transition-colors text-text-primary font-medium"
+          >
+            Later
+          </button>
+        </div>
+      )}
+
+      {state === 'complete' && !restartAvailable && (
+        <button
+          onClick={onClose}
+          className="w-full px-3 py-2 text-sm rounded bg-bg-tertiary hover:bg-bg-secondary transition-colors text-text-primary font-medium mt-2"
+        >
+          Close
+        </button>
+      )}
+
+      {(state === 'failed' || state === 'restartFailed') && (
         <button
           onClick={onClose}
           className="w-full px-3 py-2 text-sm rounded bg-bg-tertiary hover:bg-bg-secondary transition-colors text-text-primary font-medium mt-2"

@@ -2459,3 +2459,170 @@ describe('toggleFavorite', () => {
     errorSpy.mockRestore()
   })
 })
+
+describe('homepage session loading', () => {
+  it('listHomeSessions fetches only the lean home route', async () => {
+    const useSessionStore = await loadSessionStore()
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          sessions: [
+            {
+              id: 's1',
+              projectId: 'p1',
+              mode: 'planner',
+              phase: 'plan',
+              isRunning: false,
+              messageCount: 3,
+              createdAt: '2024-01-01T00:00:00.000Z',
+              updatedAt: '2024-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+    } as never)
+
+    await useSessionStore.getState().listHomeSessions()
+
+    expect(useSessionStore.getState().sessions).toHaveLength(1)
+    expect(useSessionStore.getState().sessions[0]!.id).toBe('s1')
+    expect(useSessionStore.getState().sessionsHasMore).toBe(false)
+    const urls = fetchMock.mock.calls.map((c) => (c as unknown[])[0])
+    expect(urls).toContain('/api/sessions/home')
+    // the full-list endpoint (which parses every snapshot) must never fire on a home load
+    expect(urls.filter((url) => url === '/api/sessions')).toHaveLength(0)
+  })
+
+  it('a fresh home load never fetches the full session list', async () => {
+    const useSessionStore = await loadSessionStore()
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ sessions: [] }),
+    } as never)
+
+    await useSessionStore.getState().listHomeSessions()
+
+    expect(useSessionStore.getState().searchSessions).toBeNull()
+    const urls = fetchMock.mock.calls.map((c) => (c as unknown[])[0])
+    expect(urls).not.toContain('/api/sessions')
+  })
+
+  it('ensureFullSessionList loads the full corpus once and caches it for later calls', async () => {
+    const useSessionStore = await loadSessionStore()
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          sessions: [
+            {
+              id: 's1',
+              projectId: 'p1',
+              mode: 'planner',
+              phase: 'plan',
+              isRunning: false,
+              messageCount: 1,
+              createdAt: '2024-01-01T00:00:00.000Z',
+              updatedAt: '2024-01-01T00:00:00.000Z',
+              recentUserPrompts: [{ id: 'm1', content: 'hello', timestamp: '2024-01-01T00:00:00.000Z' }],
+            },
+            {
+              id: 's2',
+              projectId: 'p2',
+              mode: 'planner',
+              phase: 'plan',
+              isRunning: false,
+              messageCount: 2,
+              createdAt: '2024-01-01T00:00:00.000Z',
+              updatedAt: '2024-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+    } as never)
+
+    const state = useSessionStore.getState()
+    await state.ensureFullSessionList()
+    await state.ensureFullSessionList()
+
+    expect(useSessionStore.getState().searchSessions).toHaveLength(2)
+    const fullListCalls = fetchMock.mock.calls.map((c) => (c as unknown[])[0]).filter((url) => url === '/api/sessions')
+    expect(fullListCalls).toHaveLength(1)
+  })
+
+  it('invalidates the search corpus when a session is deleted so stale entries disappear', async () => {
+    const useSessionStore = await loadSessionStore()
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          sessions: [
+            {
+              id: 's1',
+              projectId: 'p1',
+              mode: 'planner',
+              phase: 'plan',
+              isRunning: false,
+              messageCount: 1,
+              createdAt: '2024-01-01T00:00:00.000Z',
+              updatedAt: '2024-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+    } as never)
+    await useSessionStore.getState().ensureFullSessionList()
+    expect(useSessionStore.getState().searchSessions).not.toBeNull()
+
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({}) } as never)
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ sessions: [], pendingConfirmationsBySession: {} }),
+    } as never)
+    await useSessionStore.getState().deleteSession('s1')
+
+    expect(useSessionStore.getState().searchSessions).toBeNull()
+  })
+})
+
+describe('connect session-list refresh', () => {
+  // Fires every registered WS-status callback. The harness may hold stale
+  // callbacks from earlier tests' modules; the current store's callback is
+  // always among them, and stale ones only ever run the same lean handler on
+  // an empty store.
+  function fireConnectedCallbacks(): void {
+    for (const call of wsStatusMock.mock.calls) {
+      const cb = (call as Array<(s: string) => void>)[0]!
+      ;(cb as (s: string) => void)('connected')
+    }
+  }
+
+  it('does not fire the heavyweight global list when no session is open (homepage)', async () => {
+    const useSessionStore = await loadSessionStore()
+    await useSessionStore.getState().connect()
+
+    fetchMock.mockClear()
+    fireConnectedCallbacks()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const urls = fetchMock.mock.calls.map((c) => String((c as unknown[])[0]))
+    expect(urls).toContain('/api/projects')
+    expect(urls.some((url) => url === '/api/sessions' || url.startsWith('/api/sessions?'))).toBe(false)
+  })
+
+  it('refreshes only the active project list on connect when a session is open', async () => {
+    const useSessionStore = await loadSessionStore()
+    await useSessionStore.getState().connect()
+    useSessionStore.setState({ currentSession: { id: 's1', projectId: 'p1' } as never })
+
+    fetchMock.mockClear()
+    fireConnectedCallbacks()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const urls = fetchMock.mock.calls.map((c) => String((c as unknown[])[0]))
+    expect(urls.some((url) => url.includes('projectId=p1'))).toBe(true)
+    expect(urls.some((url) => url === '/api/sessions')).toBe(false)
+  })
+})

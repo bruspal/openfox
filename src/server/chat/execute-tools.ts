@@ -13,6 +13,8 @@ import { createToolProgressHandler } from './tool-streaming.js'
 import { createToolCallEvent, createToolResultEvent, createChatDoneEvent } from './stream-pure.js'
 import { PathAccessDeniedError, AskUserInterrupt } from '../tools/index.js'
 import { loadAllAgentsDefault, findAgentById } from '../agents/registry.js'
+import { logger } from '../utils/logger.js'
+import { sanitizeUtf8 } from '../utils/utf8.js'
 import stripAnsi from 'strip-ansi'
 
 export interface ToolBatchContext {
@@ -236,13 +238,20 @@ export async function executeTools(
       stepDoneCalled = true
     }
 
-    const content = stripAnsi(
+    const rawContent = stripAnsi(
       toolResult.success
         ? (toolResult.output ?? 'Success')
         : toolResult.output
           ? `${toolResult.output}\n\nError: ${toolResult.error}`
           : `Error: ${toolResult.error}`,
     )
+    const { clean: content, corrupted } = sanitizeUtf8(rawContent)
+    if (corrupted) {
+      logger.warn('Tool result contained invalid UTF-8 (U+FFFD); sanitized before sending to the LLM', {
+        toolCallId: toolCall.id,
+        tool: toolCall.name,
+      })
+    }
 
     append(createToolResultEvent(assistantMsgId, toolCall.id, toolResult))
 

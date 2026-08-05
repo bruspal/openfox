@@ -124,6 +124,13 @@ describe('Markdown', () => {
       expect(html).toContain('whitespace-pre-line')
     })
 
+    it('strips trailing blank lines so LLM padding does not render as gaps', () => {
+      const html = renderToString(<Markdown content={'All green.\n\n\n\n'} />)
+
+      expect(html).toContain('>All green.</p>')
+      expect(html).not.toContain('All green.\n')
+    })
+
     it('linkifies bare URLs like the markdown path does', () => {
       const html = renderToString(<Markdown content={'See https://example.com/docs for details'} />)
 

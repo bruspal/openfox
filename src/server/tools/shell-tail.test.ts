@@ -58,6 +58,29 @@ describe('stripTailPipe', () => {
     expect(stripTailPipe('cmd 2>&1 | tail -5; next_cmd')).toBeNull()
   })
 
+  it('returns null for multiple ;-separated commands each with their own tail', () => {
+    expect(
+      stripTailPipe(
+        'npm run test:unit 2>&1 | tail -4; echo "===TYPECHECK==="; npm run typecheck 2>&1 | tail -2; echo "exit=$?"; echo "===LINT==="; npm run lint 2>&1 | tail -2; echo "===DUPLICATE==="; npm run duplicate 2>&1 | tail -2',
+      ),
+    ).toBeNull()
+  })
+
+  it('returns null when two ;-separated tails end the command', () => {
+    expect(stripTailPipe('cmd1 | tail -4; cmd2 | tail -2')).toBeNull()
+  })
+
+  it('still strips when ; appears only inside quotes', () => {
+    expect(stripTailPipe('echo "a;b" | tail -3')).toEqual({
+      command: 'echo "a;b"',
+      tailLines: 3,
+    })
+  })
+
+  it('returns null for a command with a newline separator', () => {
+    expect(stripTailPipe('cmd1 | tail -4\ncmd2 | tail -2')).toBeNull()
+  })
+
   it('returns null for empty command', () => {
     expect(stripTailPipe('')).toBeNull()
   })

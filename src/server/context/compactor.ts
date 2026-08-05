@@ -34,11 +34,11 @@ export function appendCompactionPrompt(
 
 /**
  * Hard ceiling: compaction always fires when fewer than 5K tokens remain,
- * regardless of the configured threshold. Also capped at 85% of the
- * context window for large models.
+ * regardless of the configured threshold. Also capped at 95% of the
+ * context window for large models, matching the config schema and UI.
  */
 export const COMPACTION_HEADROOM_TOKENS = 5_000
-export const COMPACTION_MAX_RATIO = 0.85
+export const COMPACTION_MAX_RATIO = 0.95
 
 /**
  * Check if automatic compaction should be triggered.

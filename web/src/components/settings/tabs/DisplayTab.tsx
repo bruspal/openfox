@@ -94,6 +94,13 @@ export function DisplayTab() {
       defaultValue: 'false',
     },
     {
+      key: SETTINGS_KEYS.DISPLAY_FEED_VIRTUALIZATION,
+      label: 'Virtualize long feeds',
+      description:
+        'Mount only the most recent items and reveal older ones as you scroll up. Faster on very long sessions, but older history loading is experimental.',
+      defaultValue: 'false',
+    },
+    {
       key: SETTINGS_KEYS.DISPLAY_SHOW_SYNTAX_HIGHLIGHTING,
       label: 'Show syntax highlighting',
       description: 'Nicer formatting, but costly - applies to code blocks, diffs, and file previews',

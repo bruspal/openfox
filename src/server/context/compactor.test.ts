@@ -12,12 +12,22 @@ describe('context compactor helpers', () => {
     expect(shouldCompact(200_000, 200_000, 0)).toBe(false)
   })
 
-  it('guarantees headroom: compacts when fewer than 5K tokens remain', () => {
-    // For a 200K model: ceiling = min(195K, 170K) = 170K → 85%
-    // At 196K tokens with threshold 0.9: clamped to 0.85 → 196K > 170K → true
-    expect(shouldCompact(196_000, 200_000, 0.9)).toBe(true)
-    // At 169K tokens with threshold 0.9: clamped to 0.85 → 169K < 170K → false
-    expect(shouldCompact(169_000, 200_000, 0.9)).toBe(false)
+  it('honors configured threshold up to the 0.95 cap', () => {
+    // 200K model, threshold 0.9: below cap and headroom ceiling → fires at 180K
+    expect(shouldCompact(181_000, 200_000, 0.9)).toBe(true)
+    expect(shouldCompact(179_000, 200_000, 0.9)).toBe(false)
+  })
+
+  it('caps threshold at 0.95 for large models', () => {
+    // 500K model, threshold 0.96: clamped to 0.95 → fires at 475K, not 480K
+    expect(shouldCompact(476_000, 500_000, 0.96)).toBe(true)
+    expect(shouldCompact(474_000, 500_000, 0.96)).toBe(false)
+  })
+
+  it('respects configured threshold above the old 0.85 default', () => {
+    // 500K model, threshold 0.92: honored as-is → fires at 460K, not 425K
+    expect(shouldCompact(461_000, 500_000, 0.92)).toBe(true)
+    expect(shouldCompact(459_000, 500_000, 0.92)).toBe(false)
   })
 
   it('caps threshold for small models to preserve headroom', () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { StoredEvent } from './types.js'
+import type { StoredEvent, SnapshotMessage } from './types.js'
 import type { MessageStats } from '../../shared/types.js'
+import type { ChoiceOption } from '../../shared/protocol.js'
 import {
   buildContextMessagesFromEventHistory,
   buildContextMessagesFromStoredEvents,
@@ -13,6 +14,7 @@ import {
   foldWaitingWorkflow,
   reorderToolMessages,
 } from './folding.js'
+import { appendSnapshotMessageContext } from './fold-messages.js'
 import type { ContextMessage, MessageWithId } from './fold-types.js'
 
 const baseEvent = {
@@ -2701,7 +2703,7 @@ describe('foldSessionState metadataEntries snapshot fallback merge', () => {
   })
 })
 
-describe('buildSnapshot streamingOutput truncation', () => {
+describe('buildSnapshot streamingOutput de-duplication', () => {
   const baseEvent = { seq: 0, timestamp: 1000, sessionId: 's1' }
 
   function makeEvents(streamChunks: number, chunkSize: number, withResult: boolean): StoredEvent[] {
@@ -2739,20 +2741,54 @@ describe('buildSnapshot streamingOutput truncation', () => {
     return events
   }
 
-  it('truncates streamingOutput of finished tool calls to the tail + marker', () => {
-    // 1100 chunks × 1KB ≈ 1.1MB, above the 1MB tail budget
-    const state = foldSessionState(makeEvents(1100, 1024, true), 'window-1', 200000)
+  it('drops streamingOutput of every finished tool call, regardless of result content', () => {
+    const events: StoredEvent[] = [
+      { ...baseEvent, type: 'message.start', data: { messageId: 'm1', role: 'assistant' } },
+      {
+        ...baseEvent,
+        type: 'tool.call',
+        data: { messageId: 'm1', toolCall: { id: 'call-1', name: 'run_command', arguments: {} } },
+      },
+      {
+        ...baseEvent,
+        type: 'tool.output',
+        data: { messageId: 'm1', toolCallId: 'call-1', stream: 'stdout', content: 'first line\nsecond line\n' },
+      },
+      {
+        ...baseEvent,
+        type: 'tool.result',
+        data: {
+          messageId: 'm1',
+          toolCallId: 'call-1',
+          result: { success: true, output: 'first line\nsecond line', durationMs: 1, truncated: false },
+        },
+      },
+    ]
+
+    const state = foldSessionState(events, 'window-1', 200000)
     const snapshot = buildSnapshot(state, 100)
 
     const tc = snapshot.messages[0]!.toolCalls![0]!
-    const joined = tc.streamingOutput?.map((c) => c.content).join('') ?? ''
-    expect(joined.length).toBeLessThanOrEqual(1024 * 1024 + 1024)
-    expect(joined.endsWith('chunk-01099:' + 'x'.repeat(1024 - 12))).toBe(true) // tail preserved
-    expect(joined.startsWith('chunk-00000:')).toBe(false) // head dropped
-    expect(tc.streamingOutputTruncated).toBe(true)
+    expect(tc.streamingOutput).toBeUndefined()
+    expect(tc.streamingOutputTruncated).toBeUndefined()
+    expect(tc.result?.output).toBe('first line\nsecond line')
+    expect(tc.arguments).toEqual({})
+  })
+
+  it('drops streamingOutput of finished calls even when the result does not reproduce it', () => {
+    // result is 'Done' while the stream holds real output — the finished
+    // stream is still dropped: no consumer reads it once the call has a result
+    const state = foldSessionState(makeEvents(500, 1024, true), 'window-1', 200000)
+    const snapshot = buildSnapshot(state, 100)
+
+    const tc = snapshot.messages[0]!.toolCalls![0]!
+    expect(tc.streamingOutput).toBeUndefined()
+    expect(tc.result?.output).toBe('Done')
   })
 
   it('keeps streamingOutput integral for pending tool calls (no result yet)', () => {
+    // 1100 chunks × 1KB ≈ 1.1MB — pending (in-flight) streams are preserved
+    // in full, no size cap: a mid-run reload must keep showing the live feed.
     const state = foldSessionState(makeEvents(1100, 1024, false), 'window-1', 200000)
     const snapshot = buildSnapshot(state, 100)
 
@@ -2762,15 +2798,12 @@ describe('buildSnapshot streamingOutput truncation', () => {
     expect(tc.streamingOutputTruncated).toBeUndefined()
   })
 
-  it('keeps short streamingOutput untouched for finished tool calls', () => {
-    // 500KB — under the 1MB budget, nothing is truncated
-    const state = foldSessionState(makeEvents(500, 1024, true), 'window-1', 200000)
+  it('drops streamingOutput of finished calls no matter how large', () => {
+    const state = foldSessionState(makeEvents(1500, 1024, true), 'window-1', 200000)
     const snapshot = buildSnapshot(state, 100)
 
     const tc = snapshot.messages[0]!.toolCalls![0]!
-    const joined = tc.streamingOutput?.map((c) => c.content).join('') ?? ''
-    expect(joined.length).toBe(500 * 1024)
-    expect(tc.streamingOutputTruncated).toBeUndefined()
+    expect(tc.streamingOutput).toBeUndefined()
   })
 
   it('does not mutate foldedState when building a snapshot', () => {
@@ -2781,5 +2814,122 @@ describe('buildSnapshot streamingOutput truncation', () => {
 
     expect(state.messages[0]!.toolCalls![0]!.streamingOutput!.length).toBe(originalLength)
     expect(state.messages[0]!.toolCalls![0]!.streamingOutputTruncated).toBeUndefined()
+  })
+})
+
+describe('appendSnapshotMessageContext builds LLM context from result.output only', () => {
+  it('never leaks streamingOutput of finished tool calls into the context', () => {
+    const message: SnapshotMessage = {
+      id: 'm1',
+      role: 'assistant',
+      content: 'running the command',
+      timestamp: 1000,
+      toolCalls: [
+        {
+          id: 'call-1',
+          name: 'run_command',
+          arguments: {},
+          streamingOutput: [
+            { stream: 'stdout', content: 'secret raw stream that must not reach the LLM\n', timestamp: 1000 },
+          ],
+          result: { success: true, output: 'the canonical result', durationMs: 1, truncated: false },
+        },
+      ],
+    }
+
+    const context: ContextMessage[] = []
+    appendSnapshotMessageContext(context, message)
+
+    const toolMessages = context.filter((c) => c.role === 'tool')
+    expect(toolMessages).toHaveLength(1)
+    expect(toolMessages[0]!.content).toBe('the canonical result')
+    expect(JSON.stringify(context)).not.toContain('secret raw stream')
+  })
+})
+
+describe('foldSessionState — chat.ask_user pendingUserInput option normalization', () => {
+  const windowId = 'window-1'
+
+  it('normalizes legacy string[] options to canonical ChoiceOption[] on fold', () => {
+    const events: StoredEvent[] = [
+      {
+        ...baseEvent,
+        type: 'chat.ask_user',
+        data: {
+          callId: 'call-1',
+          question: 'Pick:',
+          type: 'choice',
+          options: ['A', 'B', 'C'] as unknown as ChoiceOption[],
+        },
+      },
+    ]
+    const state = foldSessionState(events, windowId, 200000)
+    expect(state.pendingUserInput).toEqual({
+      callId: 'call-1',
+      question: 'Pick:',
+      type: 'choice',
+      options: [
+        { value: 'A', label: 'A' },
+        { value: 'B', label: 'B' },
+        { value: 'C', label: 'C' },
+      ],
+    })
+  })
+
+  it('normalizes legacy {label, description} options to canonical ChoiceOption[] on fold', () => {
+    const events: StoredEvent[] = [
+      {
+        ...baseEvent,
+        type: 'chat.ask_user',
+        data: {
+          callId: 'call-1',
+          question: 'Pick:',
+          type: 'choice',
+          options: [
+            { label: 'Oui', description: 'Accepter' },
+            { label: 'Non', description: 'Refuser' },
+          ] as unknown as ChoiceOption[],
+        },
+      },
+    ]
+    const state = foldSessionState(events, windowId, 200000)
+    expect(state.pendingUserInput?.options).toEqual([
+      { value: 'Oui', label: 'Oui', description: 'Accepter' },
+      { value: 'Non', label: 'Non', description: 'Refuser' },
+    ])
+  })
+
+  it('keeps canonical {value, label, description} options verbatim on fold', () => {
+    const events: StoredEvent[] = [
+      {
+        ...baseEvent,
+        type: 'chat.ask_user',
+        data: {
+          callId: 'call-1',
+          question: 'Pick:',
+          type: 'choice',
+          options: [{ value: 'yes-v', label: 'Oui', description: 'Accepter' }],
+        },
+      },
+    ]
+    const state = foldSessionState(events, windowId, 200000)
+    expect(state.pendingUserInput?.options).toEqual([{ value: 'yes-v', label: 'Oui', description: 'Accepter' }])
+  })
+
+  it('leaves non-choice question types untouched', () => {
+    const events: StoredEvent[] = [
+      {
+        ...baseEvent,
+        type: 'chat.ask_user',
+        data: { callId: 'call-1', question: 'Type your answer:', type: 'text', options: undefined },
+      },
+    ]
+    const state = foldSessionState(events, windowId, 200000)
+    expect(state.pendingUserInput).toEqual({
+      callId: 'call-1',
+      question: 'Type your answer:',
+      type: 'text',
+      options: undefined,
+    })
   })
 })

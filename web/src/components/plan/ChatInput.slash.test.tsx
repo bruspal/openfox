@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi, afterEach } from 'vitest'
-import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { parseSlashCommand, extractTemplateParams } from '../../lib/parse-slash-command'
 import { ChatInput } from './ChatInput'
 import type { WorkflowInfo, CommandInfo } from '../../lib/parse-slash-command'
@@ -129,6 +129,22 @@ const mockWorkflowState = {
   fetchWorkflows: vi.fn(),
 }
 
+const mockFetchCommand = vi.fn()
+const mockCommandState = {
+  defaults: [{ id: 'review', name: 'Review', agentMode: 'builder' }],
+  userItems: [],
+  projectItems: [],
+  fetchCommands: vi.fn(),
+  fetchCommand: (...args: unknown[]) => mockFetchCommand(...args),
+}
+
+vi.mock('../../stores/commands', () => ({
+  useCommandsStore: Object.assign(
+    (selector?: (state: unknown) => unknown) => (selector ? selector(mockCommandState) : mockCommandState),
+    { getState: () => mockCommandState },
+  ),
+}))
+
 vi.mock('../../stores/session', () => ({
   useSessionStore: (selector: (state: unknown) => unknown) =>
     selector({
@@ -228,17 +244,45 @@ describe('ChatInput slash command integration', () => {
     expect(mockSendMessage).not.toHaveBeenCalled()
   })
 
-  it('clears input silently for unrecognized slash command', () => {
+  it('sends unrecognized slash input as a plain message', () => {
     const setInput = vi.fn()
-    const clearInput = vi.fn()
-    renderChatInput({ input: '/nonexistent arg', setInput, clearInput })
+    renderChatInput({ input: '/nonexistent arg', setInput })
 
     const sendButton = screen.getByTestId('chat-send-button')
     fireEvent.click(sendButton)
 
+    expect(mockSendMessage).toHaveBeenCalledWith('/nonexistent arg', [])
+    expect(mockLaunchWorkflow).not.toHaveBeenCalled()
+  })
+
+  it('sends absolute file paths as a plain message', () => {
+    const setInput = vi.fn()
+    renderChatInput({ input: '/home/conrad/Vidéos/sample_audio_fr.mp3', setInput })
+
+    const sendButton = screen.getByTestId('chat-send-button')
+    fireEvent.click(sendButton)
+
+    expect(mockSendMessage).toHaveBeenCalledWith('/home/conrad/Vidéos/sample_audio_fr.mp3', [])
+    expect(mockLaunchWorkflow).not.toHaveBeenCalled()
+  })
+
+  it('applies the command agent mode when launched via slash', async () => {
+    mockFetchCommand.mockResolvedValue({
+      metadata: { id: 'review', name: 'Review', agentMode: 'builder' },
+      prompt: 'Please review PR {{pr_number}}',
+    })
+    const setInput = vi.fn()
+    const onSendCommand = vi.fn()
+    renderChatInput({ input: '/review 123', setInput, onSendCommand })
+
+    const sendButton = screen.getByTestId('chat-send-button')
+    fireEvent.click(sendButton)
+
+    await waitFor(() => {
+      expect(onSendCommand).toHaveBeenCalledWith('Please review PR 123', 'builder')
+    })
     expect(mockSendMessage).not.toHaveBeenCalled()
     expect(mockLaunchWorkflow).not.toHaveBeenCalled()
-    expect(clearInput).toHaveBeenCalled()
   })
 
   it('shows error for missing required params', () => {

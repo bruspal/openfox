@@ -5,6 +5,7 @@ import stripAnsi from 'strip-ansi'
 import { OUTPUT_LIMITS } from './types.js'
 import { createTool, requestUserConfirmation } from './tool-helpers.js'
 import { checkAborted, spawnShellProcess } from '../utils/shell.js'
+import { decodeUtf8, createUtf8StreamDecoder } from '../utils/utf8.js'
 import { extractAbsolutePathsFromCommand, extractSensitivePathsFromCommand } from './path-security.js'
 import { terminateProcessTree } from '../utils/process-tree.js'
 import { stripTailPipe } from './shell-tail.js'
@@ -215,13 +216,13 @@ async function tryRtkRewrite(command: string): Promise<string> {
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: 2_000,
       })
-      let stdout = ''
+      const chunks: Buffer[] = []
       proc.stdout?.on('data', (data: Buffer) => {
-        stdout += data.toString()
+        chunks.push(data)
       })
       proc.on('error', reject)
       proc.on('close', (code) => {
-        if (code === 0 || code === 3) resolve(stdout.trim())
+        if (code === 0 || code === 3) resolve(decodeUtf8(chunks).trim())
         else reject(new Error(`exit ${code}`))
       })
     })
@@ -246,6 +247,8 @@ function executeCommand(
     }
 
     const proc = spawnShellProcess(command, cwd, signal, true)
+    const stdoutDecoder = createUtf8StreamDecoder()
+    const stderrDecoder = createUtf8StreamDecoder()
     let stdout = ''
     let stderr = ''
     let timedOut = false
@@ -266,15 +269,15 @@ function executeCommand(
     signal?.addEventListener('abort', onAbort)
 
     proc.stdout?.on('data', (data: Buffer) => {
-      const chunk = data.toString()
-      stdout += chunk
-      onProgress?.(`[stdout] ${chunk}`)
+      const text = stdoutDecoder.write(data)
+      stdout += text
+      onProgress?.(`[stdout] ${text}`)
     })
 
     proc.stderr?.on('data', (data: Buffer) => {
-      const chunk = data.toString()
-      stderr += chunk
-      onProgress?.(`[stderr] ${chunk}`)
+      const text = stderrDecoder.write(data)
+      stderr += text
+      onProgress?.(`[stderr] ${text}`)
     })
 
     // The 'exit' event fires when the process terminates, regardless of
@@ -285,29 +288,24 @@ function executeCommand(
     //
     // When we initiated the abort/timeout ourselves, resolve immediately
     // on 'exit' instead of waiting for 'close'.
+    const settle = (exitCode: number, appendix?: string) => {
+      const out = (stdout + stdoutDecoder.end()).trim()
+      resolve({
+        stdout: appendix ? (out ? `${out}\n\n${appendix}` : appendix) : out,
+        stderr: (stderr + stderrDecoder.end()).trim(),
+        exitCode,
+      })
+    }
+
     proc.on('exit', () => {
       if (aborted) {
         clearTimeout(timer)
         signal?.removeEventListener('abort', onAbort)
-        let output = stdout.trim()
-        if (output) output += '\n\n'
-        output += '[interrupted by user]'
-        resolve({
-          stdout: output,
-          stderr: stderr.trim(),
-          exitCode: 130,
-        })
+        settle(130, '[interrupted by user]')
       } else if (timedOut) {
         clearTimeout(timer)
         signal?.removeEventListener('abort', onAbort)
-        let output = stdout.trim()
-        if (output) output += '\n\n'
-        output += `[Exit code: 124]\n[Process timed out after ${timeout}ms]`
-        resolve({
-          stdout: output,
-          stderr: stderr.trim(),
-          exitCode: 124,
-        })
+        settle(124, `[Exit code: 124]\n[Process timed out after ${timeout}ms]`)
       }
     })
 
@@ -318,34 +316,16 @@ function executeCommand(
 
       // Promise may already be settled by 'exit' handler above — resolve is a no-op if so.
       if (timedOut) {
-        let output = stdout.trim()
-        if (output) output += '\n\n'
-        output += `[Exit code: 124]\n[Process timed out after ${timeout}ms]`
-        resolve({
-          stdout: output,
-          stderr: stderr.trim(),
-          exitCode: 124,
-        })
+        settle(124, `[Exit code: 124]\n[Process timed out after ${timeout}ms]`)
         return
       }
 
       if (aborted) {
-        let output = stdout.trim()
-        if (output) output += '\n\n'
-        output += '[interrupted by user]'
-        resolve({
-          stdout: output,
-          stderr: stderr.trim(),
-          exitCode: 130,
-        })
+        settle(130, '[interrupted by user]')
         return
       }
 
-      resolve({
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-        exitCode: code ?? 1,
-      })
+      settle(code ?? 1)
     })
 
     proc.on('error', (error) => {

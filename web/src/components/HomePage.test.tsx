@@ -19,12 +19,21 @@ vi.mock('wouter', () => ({
   useLocation: () => [undefined, vi.fn()],
 }))
 
+const { listHomeSessionsMock, listSessionsMock, ensureFullSessionListMock } = vi.hoisted(() => ({
+  listHomeSessionsMock: vi.fn(),
+  listSessionsMock: vi.fn(),
+  ensureFullSessionListMock: vi.fn(),
+}))
+
 const sessionStore = { sessions: [] as any[] }
 vi.mock('../stores/session', () => ({
   useSessionStore: (selector?: any) => {
     const state = {
       sessions: sessionStore.sessions,
-      listSessions: vi.fn(),
+      searchSessions: null,
+      listSessions: listSessionsMock,
+      listHomeSessions: listHomeSessionsMock,
+      ensureFullSessionList: ensureFullSessionListMock,
       connectionStatus: 'connected',
     }
     return selector ? selector(state) : state
@@ -75,6 +84,9 @@ function textOf(el: HTMLElement | null): string {
 beforeEach(() => {
   sessionStore.sessions = []
   document.body.innerHTML = ''
+  listHomeSessionsMock.mockClear()
+  listSessionsMock.mockClear()
+  ensureFullSessionListMock.mockClear()
 })
 
 describe('HomePage', () => {
@@ -550,5 +562,31 @@ describe('HomePage', () => {
     const { HomePage } = await import('./HomePage')
     const container = render(<HomePage />)
     expect(container.textContent).toContain('abcdef12')
+  })
+
+  it('mounts with the lean home list and lazily loads the full corpus only when searching', async () => {
+    sessionStore.sessions = [
+      {
+        id: 's1',
+        projectId: 'p1',
+        title: 'Alpha session',
+        updatedAt: '2024-06-15T10:00:00Z',
+        messageCount: 1,
+        createdAt: '2024-06-15T09:00:00Z',
+      },
+    ]
+    const { HomePage } = await import('./HomePage')
+    const container = render(<HomePage />)
+
+    expect(listHomeSessionsMock).toHaveBeenCalledTimes(1)
+    expect(listSessionsMock).not.toHaveBeenCalled()
+    expect(ensureFullSessionListMock).not.toHaveBeenCalled()
+
+    const input = container.querySelector('[placeholder="Search sessions by title or keyword..."]')!
+    await userEvent.type(input, 'alp')
+
+    await vi.waitFor(() => {
+      expect(ensureFullSessionListMock).toHaveBeenCalledTimes(1)
+    })
   })
 })

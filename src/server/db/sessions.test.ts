@@ -18,6 +18,8 @@ import {
   getSession,
   listSessions,
   listSessionsByProject,
+  listHomeSessions,
+  listSessionsLimited,
   toggleFavorite,
   updateSessionMcpDisabledServers,
   updateSessionMetadata,
@@ -367,5 +369,81 @@ describe('db sessions', () => {
     const normalIndex = sessions.findIndex((s) => s.id === sessionNormal.id)
 
     expect(favIndex).toBeLessThan(normalIndex)
+  })
+
+  describe('listHomeSessions', () => {
+    function setUpdatedAt(id: string, iso: string): void {
+      getDatabase().prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(iso, id)
+    }
+
+    it('returns at most N most recent sessions per project, ordered by last activity', () => {
+      const a1 = createSession(projectAId, rootA, 'A1')
+      const a2 = createSession(projectAId, rootA, 'A2')
+      const a3 = createSession(projectAId, rootA, 'A3')
+      const bs = Array.from({ length: 7 }, (_, i) => createSession(projectBId, rootB, `B${i + 1}`))
+
+      setUpdatedAt(a1.id, '2024-01-01T00:00:00.000Z')
+      setUpdatedAt(a2.id, '2024-01-01T00:00:01.000Z')
+      setUpdatedAt(a3.id, '2024-01-01T00:00:02.000Z')
+      bs.forEach((s, i) => setUpdatedAt(s.id, `2024-01-01T00:00:${String(i + 3).padStart(2, '0')}.000Z`))
+
+      const home = listHomeSessions()
+
+      const aIds = home.filter((s) => s.projectId === projectAId).map((s) => s.id)
+      const bIds = home.filter((s) => s.projectId === projectBId).map((s) => s.id)
+      expect(aIds).toEqual([a3.id, a2.id, a1.id]) // 3 sessions ≤ 5, all included, newest first
+      expect(bIds).toEqual(
+        bs
+          .slice(2)
+          .reverse()
+          .map((s) => s.id),
+      ) // B7, B6, B5, B4, B3
+      expect(home).toHaveLength(8)
+    })
+
+    it('excludes projects with no sessions and returns summaries only', () => {
+      const session = createSession(projectAId, rootA, 'Only')
+
+      const home = listHomeSessions()
+
+      expect(home).toHaveLength(1)
+      expect(home[0]!.id).toBe(session.id)
+      expect(home[0]).not.toHaveProperty('recentUserPrompts')
+    })
+
+    it('supports a custom per-project limit', () => {
+      createSession(projectAId, rootA, 'A1')
+      createSession(projectAId, rootA, 'A2')
+      createSession(projectBId, rootB, 'B1')
+
+      expect(listHomeSessions(1)).toHaveLength(2)
+    })
+  })
+
+  describe('listSessionsLimited', () => {
+    function setUpdatedAt(id: string, iso: string): void {
+      getDatabase().prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(iso, id)
+    }
+
+    it('returns the top-N most recent sessions across all projects with hasMore', () => {
+      const a = createSession(projectAId, rootA, 'A')
+      const b1 = createSession(projectBId, rootB, 'B1')
+      const b2 = createSession(projectBId, rootB, 'B2')
+      const b3 = createSession(projectBId, rootB, 'B3')
+
+      setUpdatedAt(a.id, '2024-01-01T00:00:03.000Z') // most recent
+      setUpdatedAt(b1.id, '2024-01-01T00:00:02.000Z')
+      setUpdatedAt(b2.id, '2024-01-01T00:00:01.000Z')
+      setUpdatedAt(b3.id, '2024-01-01T00:00:00.000Z')
+
+      const page = listSessionsLimited(2, 0)
+
+      expect(page.sessions.map((s) => s.id)).toEqual([a.id, b1.id])
+      expect(page.hasMore).toBe(true)
+
+      const page2 = listSessionsLimited(2, 2)
+      expect(page2.sessions.map((s) => s.id)).toEqual([b2.id, b3.id])
+      expect(page2.hasMore).toBe(false)
+    })
   })
 })

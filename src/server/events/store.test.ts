@@ -7,8 +7,12 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
+import { mkdtempSync, rmSync, existsSync, statSync, writeFileSync, utimesSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { EventStore, initEventStore } from './store.js'
-import type { TurnEvent, StoredEvent } from './types.js'
+import { SETTINGS_KEYS } from '../db/settings.js'
+import type { TurnEvent, StoredEvent, SessionSnapshot } from './types.js'
 
 describe('EventStore', () => {
   let db: Database.Database
@@ -1706,6 +1710,203 @@ describe('EventStore - Event Cleanup', () => {
       const refreshed = store.getRecentUserPrompts('session-1', 10)
       expect(refreshed.map((p) => p.id)).toContain('m2')
       expect(refreshed).not.toEqual(prompts)
+    })
+  })
+
+  describe('migrateSnapshotStreams', () => {
+    function snapshotWithStreams(): SessionSnapshot {
+      return {
+        mode: 'planner',
+        phase: 'plan',
+        isRunning: false,
+        messages: [
+          {
+            id: 'm1',
+            role: 'assistant',
+            content: '',
+            timestamp: 1000,
+            toolCalls: [
+              {
+                id: 'c-red',
+                name: 'run_command',
+                arguments: {},
+                streamingOutput: [{ stream: 'stdout', content: 'alpha\nbeta\n', timestamp: 1000 }],
+                result: { success: true, output: 'alpha\nbeta', durationMs: 1, truncated: false },
+              },
+              {
+                id: 'c-unique',
+                name: 'run_command',
+                arguments: {},
+                streamingOutput: [{ stream: 'stdout', content: 'gamma\ndelta\n', timestamp: 1000 }],
+                result: { success: true, output: 'Done', durationMs: 1, truncated: false },
+              },
+              {
+                id: 'c-pending',
+                name: 'run_command',
+                arguments: {},
+                streamingOutput: [{ stream: 'stdout', content: 'eta\n', timestamp: 1000 }],
+              },
+            ],
+          },
+        ],
+        criteria: [],
+        metadataEntries: {},
+        contextState: {
+          currentTokens: 0,
+          maxTokens: 200000,
+          compactionCount: 0,
+          dangerZone: false,
+          canCompact: false,
+          dynamicContextChanged: false,
+        },
+        currentContextWindowId: 'w1',
+        todos: [],
+        snapshotSeq: 1,
+        snapshotAt: 1000,
+      }
+    }
+
+    it('drops finished-call streams and keeps only pending (in-flight) streams', async () => {
+      store.append('session-1', { type: 'turn.snapshot', data: snapshotWithStreams() })
+
+      const report = await store.migrateSnapshotStreams()
+
+      expect(report.skipped).toBe(false)
+      expect(report.scanned).toBe(1)
+      expect(report.rewritten).toBe(1)
+      expect(report.droppedStreams).toBe(2)
+      expect(report.kept.pending).toBe(1)
+
+      const row = db.prepare(`SELECT payload FROM events WHERE event_type = 'turn.snapshot'`).get() as {
+        payload: string
+      }
+      const parsed = JSON.parse(row.payload) as SessionSnapshot
+      const byId = Object.fromEntries(parsed.messages[0]!.toolCalls!.map((tc) => [tc.id, tc]))
+      expect(byId['c-red']!.streamingOutput).toBeUndefined()
+      expect(byId['c-red']!.result!.output).toBe('alpha\nbeta')
+      expect(byId['c-unique']!.streamingOutput).toBeUndefined()
+      expect(byId['c-pending']!.streamingOutput).toHaveLength(1)
+    })
+
+    it('is idempotent once the maintenance flag is set', async () => {
+      db.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)`)
+      store.append('session-1', { type: 'turn.snapshot', data: snapshotWithStreams() })
+
+      await store.migrateSnapshotStreams()
+      const second = await store.migrateSnapshotStreams()
+
+      expect(second.skipped).toBe(true)
+    })
+
+    it('creates a rollback backup on a file-backed database before rewriting', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'openfox-bak-'))
+      const path = join(dir, 'test.db')
+      const fileDb = new Database(path)
+      fileDb.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)`)
+      const fileStore = new EventStore(fileDb)
+      fileStore.append('session-1', { type: 'turn.snapshot', data: snapshotWithStreams() })
+
+      const report = await fileStore.migrateSnapshotStreams()
+
+      const backupPath = path + '.pre-de-dup.bak'
+      expect(report.skipped).toBe(false)
+      expect(report.backupPath).toBe(backupPath)
+      expect(existsSync(backupPath)).toBe(true)
+
+      // The rollback copy still holds the redundant stream; the live DB dropped it.
+      const backupDb = new Database(backupPath, { readonly: true })
+      const backupRow = backupDb.prepare(`SELECT payload FROM events WHERE event_type = 'turn.snapshot'`).get() as {
+        payload: string
+      }
+      const backupParsed = JSON.parse(backupRow.payload) as SessionSnapshot
+      expect(backupParsed.messages[0]!.toolCalls!.find((tc) => tc.id === 'c-red')!.streamingOutput).toHaveLength(1)
+      backupDb.close()
+
+      const liveRow = fileDb.prepare(`SELECT payload FROM events WHERE event_type = 'turn.snapshot'`).get() as {
+        payload: string
+      }
+      const liveParsed = JSON.parse(liveRow.payload) as SessionSnapshot
+      expect(liveParsed.messages[0]!.toolCalls!.find((tc) => tc.id === 'c-red')!.streamingOutput).toBeUndefined()
+
+      // Idempotent afterwards, and the backup is not re-created/overwritten.
+      const backupMtime = statSync(backupPath).mtimeMs
+      const second = await fileStore.migrateSnapshotStreams()
+      expect(second.skipped).toBe(true)
+      expect(statSync(backupPath).mtimeMs).toBe(backupMtime)
+
+      fileDb.close()
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('leaves snapshots with only pending streams untouched', async () => {
+      const snap = snapshotWithStreams()
+      snap.messages[0]!.toolCalls = snap.messages[0]!.toolCalls!.filter((tc) => tc.id === 'c-pending')
+      store.append('session-1', { type: 'turn.snapshot', data: snap })
+
+      const report = await store.migrateSnapshotStreams()
+
+      expect(report.rewritten).toBe(0)
+      expect(report.droppedStreams).toBe(0)
+      expect(report.kept.pending).toBe(1)
+    })
+
+    it('prunes an expired rollback backup even when the migration is already done', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'openfox-bak-'))
+      const path = join(dir, 'test.db')
+      const fileDb = new Database(path)
+      fileDb.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)`)
+      const fileStore = new EventStore(fileDb)
+
+      // Flag already set -> the rewrite is skipped, but expired rollback
+      // backups still get cleaned up on every invocation.
+      fileDb
+        .prepare(`INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, 'true', ?)`)
+        .run(SETTINGS_KEYS.MAINTENANCE_SNAPSHOT_STREAMS_MIGRATED, new Date().toISOString())
+
+      const backupPath = path + '.pre-de-dup.bak'
+      writeFileSync(backupPath, 'stale rollback backup')
+      const elevenDaysAgo = new Date(Date.now() - 11 * 24 * 60 * 60 * 1000)
+      utimesSync(backupPath, elevenDaysAgo, elevenDaysAgo)
+
+      const report = await fileStore.migrateSnapshotStreams()
+
+      expect(report.skipped).toBe(true)
+      expect(existsSync(backupPath)).toBe(false)
+
+      fileDb.close()
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('keeps a recently-created rollback backup', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'openfox-bak-'))
+      const path = join(dir, 'test.db')
+      const fileDb = new Database(path)
+      fileDb.exec(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)`)
+      const fileStore = new EventStore(fileDb)
+      fileDb
+        .prepare(`INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, 'true', ?)`)
+        .run(SETTINGS_KEYS.MAINTENANCE_SNAPSHOT_STREAMS_MIGRATED, new Date().toISOString())
+
+      const backupPath = path + '.pre-de-dup.bak'
+      writeFileSync(backupPath, 'fresh rollback backup')
+
+      await fileStore.migrateSnapshotStreams()
+
+      expect(existsSync(backupPath)).toBe(true)
+
+      fileDb.close()
+      rmSync(dir, { recursive: true, force: true })
+    })
+  })
+
+  describe('checkpointWal', () => {
+    it('returns a checkpoint summary without throwing', () => {
+      store.append('session-1', { type: 'message.start', data: { messageId: 'm1', role: 'user', content: 'hi' } })
+
+      const result = store.checkpointWal()
+
+      expect(typeof result).toBe('object')
+      expect(result).toHaveProperty('checkpointed')
     })
   })
 })

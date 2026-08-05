@@ -18,6 +18,7 @@ let wsUnsubscribe: (() => void) | null = null
 const loadingSessionIds = new Set<string>()
 const loadedSessionIds = new Set<string>()
 const listingSessionsForProject = new Map<string, Promise<void>>()
+let fullSessionListPromise: Promise<void> | null = null
 
 interface SessionLoadData {
   session: Session
@@ -73,6 +74,24 @@ async function postMessage(
   } catch (error) {
     console.error('Error queueing message:', error)
   }
+}
+
+// Merge a freshly fetched session list into the store: keep the live
+// currentSession's mode/phase, preserve titles/prompts already in state, and
+// never resurrect a session the server reports as not running.
+function mergeSessionSummaries(incoming: SessionSummary[], state: SessionState): SessionSummary[] {
+  return incoming.map((s) => {
+    const existing = state.sessions.find((e) => e.id === s.id)
+    return {
+      ...s,
+      title: s.title ?? existing?.title,
+      mode: state.currentSession?.id === s.id ? state.currentSession.mode : (existing?.mode ?? s.mode),
+      phase: state.currentSession?.id === s.id ? state.currentSession.phase : (existing?.phase ?? s.phase),
+      isRunning: s.isRunning && existing?.isRunning !== false,
+      messageCount: s.messageCount,
+      ...(s.recentUserPrompts !== undefined && { recentUserPrompts: s.recentUserPrompts }),
+    }
+  })
 }
 
 export const useSessionStore = create<SessionState>((set, get) => {
@@ -153,6 +172,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
     showPasswordModal: false,
     passwordModalRetry: false,
     sessions: [],
+    searchSessions: null,
     currentSession: null,
     unreadSessionIds: [],
     messages: [],
@@ -199,7 +219,15 @@ export const useSessionStore = create<SessionState>((set, get) => {
       wsClient.onStatusChange((newStatus) => {
         set({ connectionStatus: newStatus })
         if (newStatus === 'connected') {
-          get().listSessions(undefined)
+          // Refresh the session list contextually and leanly. The homepage
+          // owns its own curated load (listHomeSessions), so we must NOT fire
+          // a heavyweight global list here. When a session is open, refresh
+          // that project's bounded list so the sidebar stays fresh after a
+          // reconnect.
+          const activeProjectId = get().currentSession?.projectId
+          if (activeProjectId) {
+            get().listSessions(activeProjectId)
+          }
           useProjectStore.getState().listProjects()
           // Reload the active session on (re)connect only when it has not been
           // loaded yet (first connect, or after any disconnect/reconnect which
@@ -316,6 +344,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
           return null
         }
         const data = await res.json()
+        set({ searchSessions: null })
         try {
           wsClient.send('session.load', { sessionId: data.session.id })
         } catch {
@@ -457,25 +486,13 @@ export const useSessionStore = create<SessionState>((set, get) => {
           const data = await res.json()
           const incoming = (data.sessions ?? []) as SessionSummary[]
           set((state) => ({
-            sessions: incoming.map((s) => {
-              const existing = state.sessions.find((e) => e.id === s.id)
-              return {
-                ...s,
-                title: s.title ?? existing?.title,
-                mode: state.currentSession?.id === s.id ? state.currentSession.mode : (existing?.mode ?? s.mode),
-                phase: state.currentSession?.id === s.id ? state.currentSession.phase : (existing?.phase ?? s.phase),
-                isRunning: s.isRunning && existing?.isRunning !== false,
-                messageCount: s.messageCount,
-                recentUserPrompts: s.recentUserPrompts,
-              }
-            }),
+            sessions: mergeSessionSummaries(incoming, state),
             sessionsHasMore: projectId ? (data.hasMore ?? false) : true,
           }))
 
           // Restore cross-session confirmation state from server
           const pendingBySession = data.pendingConfirmationsBySession as
-            | Record<string, PendingPathConfirmation[]>
-            | undefined
+            Record<string, PendingPathConfirmation[]> | undefined
           if (pendingBySession) {
             const currentSessionId = get().currentSession?.id
             const crossSessionConfirmations: Record<string, PendingPathConfirmation[]> = {}
@@ -498,6 +515,41 @@ export const useSessionStore = create<SessionState>((set, get) => {
 
       listingSessionsForProject.set(cacheKey, listPromise)
       return listPromise
+    },
+
+    listHomeSessions: async () => {
+      try {
+        const res = await authFetch('/api/sessions/home')
+        if (!res.ok) return
+        const data = (await res.json()) as { sessions: SessionSummary[] }
+        set((state) => ({
+          sessions: mergeSessionSummaries(data.sessions, state),
+          sessionsHasMore: false,
+        }))
+      } catch {
+        /* empty */
+      }
+    },
+
+    ensureFullSessionList: async () => {
+      // The full list (with prompts) powers search across all sessions. It is
+      // deliberately loaded on demand only — a fresh home page load must never
+      // pay for parsing every session snapshot.
+      if (get().searchSessions) return
+      if (fullSessionListPromise) return fullSessionListPromise
+      fullSessionListPromise = (async () => {
+        try {
+          const res = await authFetch('/api/sessions')
+          const data = await res.json()
+          const incoming = (data.sessions ?? []) as SessionSummary[]
+          set({ searchSessions: incoming })
+        } catch {
+          // Allow a retry on the next search; the visible list still works.
+        } finally {
+          fullSessionListPromise = null
+        }
+      })()
+      return fullSessionListPromise
     },
 
     loadMoreSessions: async (projectId) => {
@@ -533,6 +585,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
       try {
         const res = await authFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' })
         if (!res.ok) return false
+        set({ searchSessions: null })
         await get().listSessions()
         if (get().currentSession?.id === sessionId) {
           get().clearSession()
@@ -551,6 +604,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
           body: JSON.stringify({ title }),
         })
         if (!res.ok) return false
+        set({ searchSessions: null })
         await get().listSessions()
         const currentSessionId = get().currentSession?.id
         if (currentSessionId === sessionId) {
@@ -600,6 +654,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
       try {
         const res = await authFetch(`/api/projects/${projectId}/sessions`, { method: 'DELETE' })
         if (!res.ok) return false
+        set({ searchSessions: null })
         await get().listSessions()
         return true
       } catch {

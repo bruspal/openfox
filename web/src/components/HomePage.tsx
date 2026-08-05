@@ -19,11 +19,15 @@ export function HomePage() {
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
 
-  const sessions = useSessionStore((state) => state.sessions)
+  // The home page shows only the N most recent sessions per project; the full
+  // corpus (with prompts) is loaded on demand when the user searches.
+  const sessions = useSessionStore((state) => state.searchSessions ?? state.sessions)
+  const hasFullCorpus = useSessionStore((state) => state.searchSessions !== null)
   const projects = useProjectStore((state) => state.projects)
   const loading = useProjectStore((state) => state.loading)
   const listProjects = useProjectStore((state) => state.listProjects)
-  const listSessions = useSessionStore((state) => state.listSessions)
+  const listHomeSessions = useSessionStore((state) => state.listHomeSessions)
+  const ensureFullSessionList = useSessionStore((state) => state.ensureFullSessionList)
   const deleteProject = useProjectStore((state) => state.deleteProject)
 
   const connectionStatus = useSessionStore((state) => state.connectionStatus)
@@ -31,14 +35,22 @@ export function HomePage() {
   useEffect(() => {
     if (connectionStatus === 'connected') {
       listProjects()
-      listSessions()
+      listHomeSessions()
     }
-  }, [connectionStatus, listProjects, listSessions])
+  }, [connectionStatus, listProjects, listHomeSessions])
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery), 150)
     return () => clearTimeout(t)
   }, [searchQuery])
+
+  // Searching needs every session (with prompts) — load the full list lazily,
+  // exactly once, only once the user actually types something.
+  useEffect(() => {
+    if (debouncedQuery && !hasFullCorpus) {
+      ensureFullSessionList()
+    }
+  }, [debouncedQuery, hasFullCorpus, ensureFullSessionList])
 
   const { matchCount, filteredSessionIds, relevanceScores, matchTypes, promptSnippets } = useMemo(() => {
     if (!debouncedQuery)

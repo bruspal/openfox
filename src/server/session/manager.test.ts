@@ -331,6 +331,30 @@ describe('SessionManager', () => {
     expect(contextState.canCompact).toBe(true) // 78300 > 40000 (200000 * 0.2)
   })
 
+  it('setCurrentContextSize adds completionTokens to currentTokens for true context size', () => {
+    const session = manager.createSession(projectId)
+
+    // Last call: 83600 input tokens + 5650 output tokens = true context occupancy
+    manager.setCurrentContextSize(session.id, 83600, 5650)
+
+    const contextState = manager.getContextState(session.id)
+    expect(contextState.currentTokens).toBe(89250)
+  })
+
+  it('computes dangerZone and canCompact from prompt + completion occupancy', () => {
+    const session = manager.createSession(projectId)
+
+    // contextWindow is 200000; danger zone fires under 20000 remaining.
+    // Input alone (181000) would NOT be in the danger zone, but including the
+    // last response's output (181000 + 6500 = 187500) leaves 12500 → danger.
+    manager.setCurrentContextSize(session.id, 181000, 6500)
+
+    const contextState = manager.getContextState(session.id)
+    expect(contextState.currentTokens).toBe(187500)
+    expect(contextState.dangerZone).toBe(true)
+    expect(contextState.canCompact).toBe(true)
+  })
+
   it('getContextState uses latest context.state event value', () => {
     const session = manager.createSession(projectId)
 

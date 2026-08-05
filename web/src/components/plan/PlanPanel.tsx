@@ -63,6 +63,7 @@ export function PlanPanel({
 
   const session = useSessionStore((state) => state.currentSession)
   const storeMessages = useSessionStore((state) => state.messages)
+  const storeHiddenCount = useSessionStore((state) => state.hiddenCount)
   const sessions = useSessionStore((state) => state.sessions)
   const isRunning = useIsRunning()
   const stopGeneration = useSessionStore((state) => state.stopGeneration)
@@ -126,7 +127,11 @@ export function PlanPanel({
     return { displayItems: items, hiddenCount: 0 }
   }, [messages, maxVisibleItems])
 
-  const hiddenCount = propHiddenCount ?? computedHiddenCount
+  // The server reports how many messages it trimmed (maxVisibleItems cap); that
+  // value lives in the store and is authoritative. The client-side computation
+  // below is only a fallback for data that arrived untrimmed (streaming/replay),
+  // where the server value would already be reflected or unavailable.
+  const hiddenCount = propHiddenCount ?? storeHiddenCount ?? computedHiddenCount
 
   const { isAutoScrollActive, setAutoScroll, handleScrollbarGesture } = useAutoScroll(
     scrollContainerRef,

@@ -329,6 +329,22 @@ for i in a b c d e f g h i j; do echo "$i"; done
       expect(result.output).toContain('first')
       expect(result.output).toContain('second')
     })
+
+    it('keeps every section when multiple ;-separated commands have their own tails', async () => {
+      const result = await runCommandTool.execute(
+        {
+          command: 'printf "a1\\na2\\na3\\na4\\na5\\n" | tail -2; echo "===MID==="; printf "b1\\nb2\\nb3\\n" | tail -1',
+        },
+        context,
+      )
+
+      expect(result.output).toContain('a4')
+      expect(result.output).toContain('a5')
+      expect(result.output).not.toContain('a1')
+      expect(result.output).toContain('===MID===')
+      expect(result.output).toContain('b3')
+      expect(result.output).not.toContain('b1')
+    })
   })
 })
 

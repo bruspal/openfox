@@ -1,6 +1,7 @@
 import type { ToolResult } from '../../shared/types.js'
 import type { Tool, ToolContext } from './types.js'
-import type { PendingQuestionPayload } from '../../shared/protocol.js'
+import type { PendingQuestionPayload, ChoiceOption } from '../../shared/protocol.js'
+import { normalizeAskOptions } from '../../shared/ask-options.js'
 import { createDeferred } from '../utils/async.js'
 
 // Store pending questions by call ID
@@ -13,7 +14,7 @@ const pendingQuestions = new Map<
     sessionId: string
     question: string
     type: 'text' | 'confirm' | 'choice'
-    options: string[] | undefined
+    options: ChoiceOption[] | undefined
   }
 >()
 
@@ -39,8 +40,22 @@ export const askUserTool: Tool = {
           },
           options: {
             type: 'array',
-            items: { type: 'string' },
-            description: 'Options for choice-type questions',
+            description:
+              'Options for choice-type questions. Each entry may be a plain string or an object {value, label, description?} (or legacy {label, description?}). The server normalizes everything to {value, label, description?}.',
+            items: {
+              oneOf: [
+                { type: 'string' },
+                {
+                  type: 'object',
+                  properties: {
+                    value: { type: 'string' },
+                    label: { type: 'string' },
+                    description: { type: 'string' },
+                  },
+                  required: ['label'],
+                },
+              ],
+            },
           },
         },
         required: ['question'],
@@ -51,7 +66,7 @@ export const askUserTool: Tool = {
   async execute(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const question = args['question'] as string
     const type = (args['type'] as 'text' | 'confirm' | 'choice') ?? 'text'
-    const options = args['options'] as string[] | undefined
+    const options = normalizeAskOptions(args['options'])
 
     const callId = context.toolCallId ?? crypto.randomUUID()
 
@@ -77,7 +92,7 @@ export class AskUserInterrupt extends Error {
     public readonly callId: string,
     public readonly question: string,
     public readonly type: 'text' | 'confirm' | 'choice' = 'text',
-    public readonly options?: string[],
+    public readonly options?: ChoiceOption[],
   ) {
     super('Ask user interrupt')
     this.name = 'AskUserInterrupt'

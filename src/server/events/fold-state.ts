@@ -22,6 +22,7 @@ import {
   foldTurnEventsToSnapshotMessagesFromInitial,
   applyTurnEventsToSnapshotMessages,
 } from './fold-messages.js'
+import { normalizeAskOptions } from '../../shared/ask-options.js'
 
 function getTimestamp(event: EventLike): number {
   return event.timestamp ?? Date.now()
@@ -316,9 +317,14 @@ export function foldSessionState(
           callId: string
           question: string
           type?: 'text' | 'confirm' | 'choice'
-          options?: string[]
+          options?: import('../../shared/protocol.js').ChoiceOption[]
         }
-        pendingUserInput = { callId: data.callId, question: data.question, type: data.type, options: data.options }
+        pendingUserInput = {
+          callId: data.callId,
+          question: data.question,
+          type: data.type,
+          options: normalizeAskOptions(data.options),
+        }
         break
       }
       case 'task.completed': {
@@ -407,43 +413,59 @@ export function foldWaitingWorkflow(events: EventLike[]): FoldedSessionState['wa
   return waitingWorkflow
 }
 
-// Maximum retained streaming output per finished tool call in a snapshot.
-// RunCommandView only renders `result` once a command is done — the raw
-// stdout/stderr stream is never displayed afterwards — so persisting it in
-// full just bloats the snapshot (a single long session accumulated 41MB).
-// The threshold is deliberately high (1MB) so ordinary command outputs keep
-// their full stream in the snapshot (the data contract for CLI/mobile
-// clients); only pathological outputs (giant builds, log dumps) are trimmed
-// to the tail, and the raw tool.output events remain the source of truth
-// until cleanupOldEvents prunes them.
-export const SNAPSHOT_STREAMING_TAIL_BYTES = 1024 * 1024
+// ============================================================================
+// Snapshot streaming de-duplication
+//
+// A finished tool call's `streamingOutput` (the raw stdout/stderr feed shown
+// live in the feed) is NOT reused anywhere once the call has a result:
+// - The web UI renders it only while status === 'pending'; finished calls show
+//   `result` (RunCommandView, ToolCallDisplay).
+// - The LLM context is built exclusively from `result.output`
+//   (appendSnapshotMessageContext in fold-messages.ts).
+// Persisting it therefore just bloats snapshots (a single session once
+// accumulated 41MB of it). We drop it from snapshots for EVERY finished call
+// (one that has a result) — unconditionally, no content inspection needed,
+// because no consumer ever reads a finished call's stream. Pending (in-flight)
+// calls keep their stream in full, without any size cap: a mid-run reload must
+// keep showing the live feed, and the raw tool.output events remain the source
+// of truth while the session runs.
+// ============================================================================
 
-function truncateSnapshotStreamingOutput(messages: SnapshotMessage[]): SnapshotMessage[] {
-  return messages.map((message) => {
+/**
+ * Remove streaming output from finished tool calls in snapshot messages.
+ * Returns new message objects for modified messages — inputs are not mutated.
+ */
+export function trimSnapshotStreamingOutput(messages: SnapshotMessage[]): {
+  messages: SnapshotMessage[]
+  droppedStreams: number
+  keptStreams: number
+} {
+  let droppedStreams = 0
+  let keptStreams = 0
+  const trimmedMessages = messages.map((message) => {
     const toolCalls = message.toolCalls
     if (!toolCalls) return message
     let changed = false
     const newToolCalls = toolCalls.map((tc) => {
       if (!tc.streamingOutput || tc.streamingOutput.length === 0) return tc
-      // Finished calls (with a result) no longer need the live stream —
-      // keep only the tail. Pending calls keep everything (reload while running).
-      if (tc.result === undefined) return tc
-      let total = 0
-      for (const chunk of tc.streamingOutput) total += chunk.content.length
-      if (total <= SNAPSHOT_STREAMING_TAIL_BYTES) return tc
-      const kept: typeof tc.streamingOutput = []
-      let keptBytes = 0
-      for (let i = tc.streamingOutput.length - 1; i >= 0 && keptBytes < SNAPSHOT_STREAMING_TAIL_BYTES; i--) {
-        const chunk = tc.streamingOutput[i]!
-        kept.unshift(chunk)
-        keptBytes += chunk.content.length
+      // Finished calls (with a result): the stream is dead weight — the feed
+      // shows `result`, and the LLM context never included it.
+      if (tc.result !== undefined) {
+        droppedStreams++
+        changed = true
+        const { streamingOutput: _omitted, streamingOutputTruncated: _omittedFlag, ...rest } = tc
+        void _omitted
+        void _omittedFlag
+        return rest as ToolCallWithResult
       }
-      changed = true
-      return { ...tc, streamingOutput: kept, streamingOutputTruncated: true } satisfies ToolCallWithResult
+      // Pending call: keep the live stream so a mid-run reload keeps showing it.
+      keptStreams++
+      return tc
     })
     if (!changed) return message
     return { ...message, toolCalls: newToolCalls }
   })
+  return { messages: trimmedMessages, droppedStreams, keptStreams }
 }
 
 export function buildSnapshot(
@@ -451,10 +473,10 @@ export function buildSnapshot(
   latestSeq: number,
   snapshotAt: number = Date.now(),
 ): SessionSnapshot {
-  // The snapshot is the hot path loaded on every session open — trim the
-  // never-displayed streaming output before persisting it. The function
+  // The snapshot is the hot path loaded on every session open — de-duplicate
+  // the never-displayed streaming output before persisting it. The function
   // returns new objects for any modified messages so foldedState is not mutated.
-  const messages = truncateSnapshotStreamingOutput(foldedState.messages)
+  const { messages } = trimSnapshotStreamingOutput(foldedState.messages)
   return {
     mode: foldedState.mode,
     phase: foldedState.phase,
@@ -518,10 +540,10 @@ export function buildSnapshotFromSessionState(input: {
         events.slice(latestSnapshotIndex + 1),
       )
     : foldedState.messages
-  // The snapshot is the hot path loaded on every session open — trim the
-  // never-displayed streaming output before persisting it. The function
+  // The snapshot is the hot path loaded on every session open — de-duplicate
+  // the never-displayed streaming output before persisting it. The function
   // returns new objects for modified messages so the source arrays are not mutated.
-  const trimmedMessages = truncateSnapshotStreamingOutput(messages)
+  const { messages: trimmedMessages } = trimSnapshotStreamingOutput(messages)
 
   return {
     mode: session.mode,

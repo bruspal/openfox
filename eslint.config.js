@@ -22,9 +22,10 @@ export default tseslint.config(
       'preserve-caught-error': 'off',
     },
   },
-  // CLI files legitimately use console.log for user-facing output
+  // CLI files legitimately use console.log for user-facing output; so do the
+  // standalone maintenance scripts (scripts/optimize-snapshots.ts, ...).
   {
-    files: ['src/cli/**/*.ts'],
+    files: ['src/cli/**/*.ts', 'scripts/**/*.ts'],
     rules: {
       'no-console': 'off',
     },

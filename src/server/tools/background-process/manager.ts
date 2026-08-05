@@ -2,6 +2,7 @@ import type { ServerMessage, BackgroundProcess } from '../../../shared/protocol.
 import * as store from './store.js'
 import { spawnShell } from '../../utils/shell.js'
 import { killProcessTree } from '../../utils/process-tree.js'
+import { createUtf8StreamDecoder } from '../../utils/utf8.js'
 
 type ProcessEventListener = (processId: string, msg: ServerMessage) => void
 const listeners = new Set<ProcessEventListener>()
@@ -59,8 +60,11 @@ export function startProcessCommand(processId: string, sessionId: string, comman
     sessionId,
   })
 
+  const stdoutDecoder = createUtf8StreamDecoder()
+  const stderrDecoder = createUtf8StreamDecoder()
+
   child.stdout?.on('data', (chunk: Buffer) => {
-    const text = chunk.toString()
+    const text = stdoutDecoder.write(chunk)
     store.appendLog(processId, text, 'stdout')
     emitProcessEvent(processId, {
       type: 'backgroundProcess.output',
@@ -70,13 +74,37 @@ export function startProcessCommand(processId: string, sessionId: string, comman
   })
 
   child.stderr?.on('data', (chunk: Buffer) => {
-    const text = chunk.toString()
+    const text = stderrDecoder.write(chunk)
     store.appendLog(processId, text, 'stderr')
     emitProcessEvent(processId, {
       type: 'backgroundProcess.output',
       payload: { processId, stream: 'stderr', content: text },
       sessionId,
     })
+  })
+
+  child.stdout?.on('close', () => {
+    const rest = stdoutDecoder.end()
+    if (rest) {
+      store.appendLog(processId, rest, 'stdout')
+      emitProcessEvent(processId, {
+        type: 'backgroundProcess.output',
+        payload: { processId, stream: 'stdout', content: rest },
+        sessionId,
+      })
+    }
+  })
+
+  child.stderr?.on('close', () => {
+    const rest = stderrDecoder.end()
+    if (rest) {
+      store.appendLog(processId, rest, 'stderr')
+      emitProcessEvent(processId, {
+        type: 'backgroundProcess.output',
+        payload: { processId, stream: 'stderr', content: rest },
+        sessionId,
+      })
+    }
   })
 
   child.on('exit', (code, signal) => {

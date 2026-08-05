@@ -1,14 +1,14 @@
 import { Router } from 'express'
 import { stat, mkdir, readdir, access } from 'node:fs/promises'
 import { constants } from 'node:fs'
-import { resolve, isAbsolute, join } from 'node:path'
+import { resolve, isAbsolute, join, win32 } from 'node:path'
 import { loadWorkspaceConfig, saveWorkspaceConfig } from '../git/workspace-config.js'
 import { getGlobalDataDir } from '../git/workspace.js'
 import { getProjectByWorkdir, updateProject } from '../db/projects.js'
 import { setSessionDisabledServers } from '../mcp/session-overrides.js'
 import { logger } from '../utils/logger.js'
 import type { WorkspaceConfig } from '../../shared/workspace.js'
-import { getRootDirBlockReason } from '../../shared/workspace.js'
+import { formatRootDir, getRootDirBlockReason, suggestRootDirChild } from '../../shared/workspace.js'
 import type { SessionManager } from '../session/manager.js'
 
 async function isWritable(path: string): Promise<boolean> {
@@ -22,6 +22,18 @@ async function isWritable(path: string): Promise<boolean> {
 
 function resolveRootDir(rootDir: string, workdir: string): string {
   return isAbsolute(rootDir) ? rootDir : resolve(workdir, rootDir)
+}
+
+/**
+ * Compare two resolved directory paths. On Windows separators are interchangeable
+ * and the filesystem is case-insensitive, so `C:\Foo\` and `c:/foo` are the same
+ * directory — comparing them raw makes an unchanged rootDir look like a move and
+ * triggers a phantom orphan scan.
+ */
+function isSameDir(a: string, b: string): boolean {
+  if (process.platform !== 'win32') return a.replace(/\/+$/, '') === b.replace(/\/+$/, '')
+  const normalize = (p: string): string => win32.normalize(p).replace(/\\+$/, '').toLowerCase()
+  return normalize(a) === normalize(b)
 }
 
 async function checkDirExists(path: string): Promise<boolean> {
@@ -103,7 +115,7 @@ export function createWorkspaceConfigRoutes(sessionManager: SessionManager): Rou
       const trimmed = rootDir.trim()
       if (trimmed) {
         const resolvedPath = resolveRootDir(trimmed, workdir)
-        const displayPath = resolvedPath.replace(/\/+$/, '') || '/'
+        const displayPath = formatRootDir(resolvedPath)
         const blockReason = getRootDirBlockReason(resolvedPath)
         if (blockReason === 'exact') {
           return res
@@ -169,11 +181,11 @@ export function createWorkspaceConfigRoutes(sessionManager: SessionManager): Rou
     }
 
     const resolvedPath = resolveRootDir(rootDir, workdir)
-    const displayPath = resolvedPath.replace(/\/+$/, '') || '/'
+    const displayPath = formatRootDir(resolvedPath)
 
     const blockReason = getRootDirBlockReason(resolvedPath)
     if (blockReason === 'exact') {
-      const suggestion = typeof projectName === 'string' ? `${displayPath}/${projectName}` : undefined
+      const suggestion = typeof projectName === 'string' ? suggestRootDirChild(resolvedPath, projectName) : undefined
       return res.status(400).json({
         error: suggestion
           ? `Cannot use "${displayPath}" directly as workspace root. Use a subdirectory like "${suggestion}" instead.`
@@ -202,12 +214,12 @@ export function createWorkspaceConfigRoutes(sessionManager: SessionManager): Rou
       const project = getProjectByWorkdir(workdir)
       const previousRootDir = project?.workspaceRootDir ? resolveRootDir(project.workspaceRootDir, workdir) : null
 
-      if (previousRootDir && previousRootDir !== resolvedPath) {
+      if (previousRootDir && !isSameDir(previousRootDir, resolvedPath)) {
         const orphans = await findOrphanedWorkspaces(previousRootDir)
         workspaces.push(...orphans)
       } else if (!previousRootDir && projectName && typeof projectName === 'string') {
         const defaultDir = join(getGlobalDataDir(), 'workspaces', projectName)
-        if (defaultDir !== resolvedPath) {
+        if (!isSameDir(defaultDir, resolvedPath)) {
           const orphans = await findOrphanedWorkspaces(defaultDir)
           workspaces.push(...orphans)
         }

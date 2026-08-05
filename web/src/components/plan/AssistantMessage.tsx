@@ -11,6 +11,7 @@ import { useSessionStore } from '../../stores/session'
 import { useAgentsStore, getAgentColor } from '../../stores/agents'
 import { BranchIcon, CopyIcon, InfoIcon, WarningSmallIcon } from '../shared/icons'
 import { forkSession } from '../../lib/api.js'
+import { deriveToolCallStatus } from '../../lib/toolStatus'
 import { useLocation } from 'wouter'
 import { formatTime } from '../../lib/format-stats'
 import { copyToClipboard } from '../../lib/clipboard.js'
@@ -196,7 +197,7 @@ export const AssistantMessage = memo(function AssistantMessage({
 
             case 'text':
               return (
-                <div key={i} className="prose prose-sm prose-invert max-w-none">
+                <div key={i} className="prose prose-sm prose-invert max-w-none feed-item">
                   <Markdown content={element.content} isStreaming={message.isStreaming} />
                 </div>
               )
@@ -227,9 +228,10 @@ export const AssistantMessage = memo(function AssistantMessage({
                 return <TodoListDisplay key={i} todos={todos} />
               }
 
-              // Determine status - check for interrupted marker in output
-              const isInterrupted = result?.output?.includes('[interrupted by user]')
-              const status = result ? (isInterrupted ? 'interrupted' : result.success ? 'success' : 'error') : 'pending'
+              // Determine status from the result — a successful read whose
+              // content merely mentions the "[interrupted by user]" marker
+              // text is NOT an interrupted run (see deriveToolCallStatus).
+              const status = deriveToolCallStatus(result)
 
               // Default: standard tool call display
               return (
@@ -268,7 +270,7 @@ export const AssistantMessage = memo(function AssistantMessage({
               const formatSpeed = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n.toFixed(1))
 
               return (
-                <div key={i} className="flex items-center justify-center gap-1.5 text-[10px] text-text-muted mt-3">
+                <div key={i} className="flex items-center justify-center gap-1.5 text-[10px] text-text-muted">
                   <span className="flex-1 h-px bg-border" />
                   <span className="text-text-secondary">{shortModel}</span>
                   <span className="text-text-muted">·</span>

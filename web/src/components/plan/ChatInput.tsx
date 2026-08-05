@@ -391,7 +391,7 @@ export function ChatInput({
             for (const [key, value] of Object.entries(namedParams)) {
               prompt = prompt.replaceAll(`{{${key}}}`, value)
             }
-            sendMessage(prompt, undefined)
+            onSendCommand(prompt, full.metadata.agentMode)
             clearInput()
           }
           sendingRef.current = false
@@ -399,10 +399,6 @@ export function ChatInput({
         })
         return
       }
-      // Unrecognized slash command — don't send as normal message
-      clearInput()
-      sendingRef.current = false
-      return
     }
 
     sendMessage(input, attachments)
