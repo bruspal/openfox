@@ -43,6 +43,37 @@ export function SessionDropdown({
       onClick: () => {},
     })
 
+    const buildSessionItem = (session: SessionSummary, showTime: boolean) => {
+      result.push({
+        label: (
+          <div className="min-w-[160px]">
+            <div className="truncate text-sm">
+              {trimContent(session.title ?? session.id.slice(0, 8), MAX_TITLE_LEN)}
+            </div>
+            {showTime && <div className="text-text-muted text-xs">{formatTime(session.updatedAt)}</div>}
+          </div>
+        ),
+        icon: session.id === currentSession?.id ? <CheckIcon /> : undefined,
+        href: `/p/${currentProject.id}/s/${session.id}`,
+        onClick: () => {
+          loadSession(session.id)
+        },
+        labelAction: (
+          <button
+            onClick={() => toggleFavorite(session.id, !session.isFavorite)}
+            className="flex-shrink-0 p-1 hover:bg-bg-tertiary rounded transition-colors"
+            title={session.isFavorite ? 'Unfavorite session' : 'Favorite session'}
+          >
+            {session.isFavorite ? (
+              <StarFilledIcon className="w-3.5 h-3.5 text-yellow-500" />
+            ) : (
+              <StarIcon className="w-3.5 h-3.5 text-text-muted hover:text-yellow-500" />
+            )}
+          </button>
+        ),
+      })
+    }
+
     const buildGroup = (groupSessions: SessionSummary[]) => {
       const grouped = groupSessionsByDate(groupSessions)
       for (const [_dateKey, daySessions] of grouped) {
@@ -59,40 +90,15 @@ export function SessionDropdown({
         })
 
         for (const session of daySessions) {
-          result.push({
-            label: (
-              <div className="min-w-[160px]">
-                <div className="truncate text-sm">
-                  {trimContent(session.title ?? session.id.slice(0, 8), MAX_TITLE_LEN)}
-                </div>
-                <div className="text-text-muted text-xs">{formatTime(session.updatedAt)}</div>
-              </div>
-            ),
-            icon: session.id === currentSession?.id ? <CheckIcon /> : undefined,
-            href: `/p/${currentProject.id}/s/${session.id}`,
-            onClick: () => {
-              loadSession(session.id)
-            },
-            labelAction: (
-              <button
-                onClick={() => toggleFavorite(session.id, !session.isFavorite)}
-                className="flex-shrink-0 p-1 hover:bg-bg-tertiary rounded transition-colors"
-                title={session.isFavorite ? 'Unfavorite session' : 'Favorite session'}
-              >
-                {session.isFavorite ? (
-                  <StarFilledIcon className="w-3.5 h-3.5 text-yellow-500" />
-                ) : (
-                  <StarIcon className="w-3.5 h-3.5 text-text-muted hover:text-yellow-500" />
-                )}
-              </button>
-            ),
-          })
+          buildSessionItem(session, true)
         }
       }
     }
 
     if (favoriteSessions.length > 0) {
-      buildGroup(favoriteSessions)
+      for (const session of favoriteSessions) {
+        buildSessionItem(session, false)
+      }
     }
     buildGroup(otherSessions)
 
@@ -118,6 +124,7 @@ export function SessionDropdown({
         </button>
       }
       minWidth="280px"
+      labelActionClassName="pr-3"
     />
   )
 }

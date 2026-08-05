@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http'
 import type { SessionManager } from './session/manager.js'
 import { registerSessionFavoriteRoute } from './routes/session-favorite.js'
 
-const mockToggleFavorite = vi.fn()
+const { mockToggleFavorite } = vi.hoisted(() => ({ mockToggleFavorite: vi.fn() }))
 
 vi.mock('./db/sessions.js', () => ({
   toggleFavorite: mockToggleFavorite,

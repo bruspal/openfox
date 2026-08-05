@@ -174,9 +174,7 @@ export function Sidebar({ projectId, isOpen = true, onClose }: SidebarProps) {
     setShowDeleteAll(false)
   }
 
-  const handleToggleFavorite = (sessionId: string, isFavorite: boolean, e?: React.MouseEvent) => {
-    e?.preventDefault()
-    e?.stopPropagation()
+  const handleToggleFavorite = (sessionId: string, isFavorite: boolean) => {
     toggleFavorite(sessionId, !isFavorite)
   }
 
@@ -419,7 +417,7 @@ function renderSessionList(
   unreadSessionIds: string[],
   handleDeleteSession: (sessionId: string, e?: React.MouseEvent) => void,
   handleRenameSession: (sessionId: string, e?: React.MouseEvent) => void,
-  handleToggleFavorite: (sessionId: string, isFavorite: boolean, e?: React.MouseEvent) => void,
+  handleToggleFavorite: (sessionId: string, isFavorite: boolean) => void,
   projectId: string,
   sessionsWithPendingConfirmations: string[],
   pendingPathConfirmations: PendingPathConfirmation[],
@@ -457,19 +455,17 @@ function renderSessionList(
                 : (session.title ?? session.id.slice(0, 6))}
             </span>
             <div className="flex items-center gap-1">
-              <button
-                onClick={(e) => handleToggleFavorite(session.id, isFavorite, e)}
-                className="p-1.5 rounded hover:bg-bg-tertiary text-text-muted hover:text-text-primary transition-all"
-                title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-              >
-                {isFavorite ? (
-                  <StarFilledIcon className="w-3.5 h-3.5 text-amber-400" />
-                ) : (
-                  <StarIcon className="w-3.5 h-3.5" />
-                )}
-              </button>
               <DropdownMenu
                 items={[
+                  {
+                    label: isFavorite ? 'Remove from favorites' : 'Add to favorites',
+                    icon: isFavorite ? (
+                      <StarFilledIcon className="w-3.5 h-3.5 text-amber-400" />
+                    ) : (
+                      <StarIcon className="w-3.5 h-3.5" />
+                    ),
+                    onClick: () => handleToggleFavorite(session.id, isFavorite),
+                  },
                   {
                     label: 'Rename session',
                     onClick: (e?: React.MouseEvent) => handleRenameSession(session.id, e),
@@ -484,7 +480,6 @@ function renderSessionList(
                   <button
                     onClick={(e) => {
                       e.preventDefault()
-                      e.stopPropagation()
                     }}
                     className="p-1.5 rounded hover:bg-bg-tertiary text-text-muted hover:text-text-primary transition-all"
                     title="Options"
@@ -511,7 +506,9 @@ function renderSessionList(
               />
             ) : null}
             {/* Time in muted style */}
-            <span className="text-text-muted text-xs flex-shrink-0">{formatTime(session.updatedAt)}</span>
+            {!isFavorite && (
+              <span className="text-text-muted text-xs flex-shrink-0">{formatTime(session.updatedAt)}</span>
+            )}
             {/* Message count in muted style */}
             <span className="text-text-muted text-xs flex-shrink-0">{session.messageCount} messages</span>
           </div>

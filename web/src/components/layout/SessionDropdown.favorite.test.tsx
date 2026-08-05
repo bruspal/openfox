@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { act } from 'react'
 import { SessionDropdown } from './SessionDropdown'
 import type { SessionSummary } from '@shared/types.js'
+import { formatTime } from '../../lib/format-date'
 
 vi.mock('wouter', () => ({
   Link: ({ children, href, onClick }: any) => (
@@ -124,6 +125,18 @@ describe('SessionDropdown favorites', () => {
     expect(menu?.textContent).toContain('Beta')
     const buttons = getStars()
     expect(buttons.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('lists favorites first without showing their times', () => {
+    const container = render(
+      <SessionDropdown sessions={sessions} currentProject={currentProject} currentSession={null} />,
+    )
+    clickTrigger(container)
+    const menu = document.querySelector('[data-testid="session-dropdown-menu"]')
+    const text = menu?.textContent ?? ''
+    expect(text.indexOf('Beta')).toBeLessThan(text.indexOf('Alpha'))
+    expect(text).not.toContain(formatTime(sessions[1]!.updatedAt))
+    expect(text).toContain(formatTime(sessions[0]!.updatedAt))
   })
 
   it('toggles favorite without navigating on star click', () => {

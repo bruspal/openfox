@@ -20,6 +20,7 @@ interface DropdownMenuProps {
   minWidth?: string
   isOpen?: boolean
   onOpenChange?: (open: boolean) => void
+  labelActionClassName?: string
 }
 
 export function DropdownMenu({
@@ -29,6 +30,7 @@ export function DropdownMenu({
   minWidth = '120px',
   isOpen: controlledIsOpen,
   onOpenChange,
+  labelActionClassName,
 }: DropdownMenuProps) {
   const [internalIsOpen, setInternalIsOpen] = useState(false)
   const isControlled = controlledIsOpen !== undefined
@@ -247,7 +249,7 @@ export function DropdownMenu({
 
     if (item.labelAction) {
       return (
-        <div key={baseIndex} className={`flex items-center gap-1 pr-1 ${borderClass}`}>
+        <div key={baseIndex} className={`flex items-center gap-1 pr-1 ${borderClass} ${labelActionClassName ?? ''}`}>
           {linkOrButton}
           <span className="flex-shrink-0">{item.labelAction}</span>
         </div>
