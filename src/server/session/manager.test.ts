@@ -40,6 +40,8 @@ import {
 import { buildContextMessagesFromEventHistory, foldContextState } from '../events/folding.js'
 import * as eventModule from '../events/index.js'
 import { setAgentModelOverride } from '../agents/model-overrides.js'
+import * as bgpManager from '../tools/background-process/manager.js'
+import { addAllowedPath, isPathAllowed } from '../tools/path-security.js'
 import { SessionManager } from './manager.js'
 
 // Mock provider manager
@@ -134,6 +136,48 @@ describe('SessionManager', () => {
     expect(manager.getActiveSessionId()).toBeNull()
     expect(shutdownLspManagerMock).toHaveBeenCalledWith(first.id)
     expect(events).toEqual(['session_created', 'session_created', 'session_deleted'])
+  })
+
+  it("deleteSession stops and removes the session's background processes", async () => {
+    const session = manager.createSession(projectId)
+
+    const proc = bgpManager.createProcess(session.id, 'sleeper', 'sleep 30', '/tmp')!
+    const pid = bgpManager.startProcessCommand(proc.id, session.id, 'sleep 30', '/tmp')!
+    expect(pid).toBeGreaterThan(0)
+
+    manager.deleteSession(session.id)
+
+    expect(bgpManager.getSessionProcesses(session.id)).toEqual([])
+
+    for (let i = 0; i < 100; i++) {
+      try {
+        process.kill(pid, 0)
+      } catch {
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    throw new Error(`Process ${pid} is still alive after 5s`)
+  })
+
+  it('deleteSession clears the per-session registries', () => {
+    const session = manager.createSession(projectId)
+
+    manager.setDebugDump(session.id, { cachedPrompt: 'prompt', cachedTools: ['a'], liveTools: ['b'] })
+    manager.setDynamicContextChanged(session.id, true)
+    manager.recordFileRead(session.id, '/tmp/file.txt', 'hash1')
+    manager.setActiveSubAgent(session.id, { subAgentId: 'sub-1', subAgentType: 'explorer' })
+    manager.setCurrentContextSize(session.id, 1000, 0, 'sub-1')
+    addAllowedPath(session.id, '/tmp/secret.txt')
+
+    manager.deleteSession(session.id)
+
+    expect(manager.getReadFiles(session.id)).toEqual({})
+    expect(manager.getDynamicContextChanged(session.id)).toBe(false)
+    expect(manager.getActiveSubAgent(session.id)).toBeUndefined()
+    expect(manager.getSubAgentContextTokens('sub-1')).toBeUndefined()
+    expect(isPathAllowed(session.id, '/tmp/secret.txt')).toBe(false)
+    expect((manager as unknown as { debugDumpStore: Map<string, unknown> }).debugDumpStore.has(session.id)).toBe(false)
   })
 
   it('throws when requiring a missing session and resolves lsp managers lazily', () => {
