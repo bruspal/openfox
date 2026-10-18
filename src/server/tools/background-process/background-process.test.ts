@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { tmpdir } from 'node:os'
 import * as store from './store.js'
 import * as manager from './manager.js'
+
+// A command that stays alive ~30s on both Unix and Windows (cmd.exe has no
+// `sleep`). Spawned in the OS temp dir, which exists on every platform.
+const LONG_LIVE_CMD = process.platform === 'win32' ? 'ping -n 31 127.0.0.1' : 'sleep 30'
+const TEST_CWD = tmpdir()
 
 async function waitForProcessExit(pid: number): Promise<void> {
   for (let i = 0; i < 100; i++) {
@@ -215,8 +221,8 @@ describe('background-process store', () => {
   describe('stopSessionProcesses', () => {
     it('removes all processes and logs for the session and kills running ones', async () => {
       const sessionId = 'test-session-stop-all'
-      const running = store.createProcess(sessionId, 'sleeper', 'sleep 30', '/tmp')!
-      const pid = manager.startProcessCommand(running.id, sessionId, 'sleep 30', '/tmp')!
+      const running = store.createProcess(sessionId, 'sleeper', LONG_LIVE_CMD, TEST_CWD)!
+      const pid = manager.startProcessCommand(running.id, sessionId, LONG_LIVE_CMD, TEST_CWD)!
       expect(pid).toBeGreaterThan(0)
 
       const exited = store.createProcess(sessionId, 'exited', 'echo done', '/tmp')!

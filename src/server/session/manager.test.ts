@@ -42,6 +42,11 @@ import * as eventModule from '../events/index.js'
 import { setAgentModelOverride } from '../agents/model-overrides.js'
 import * as bgpManager from '../tools/background-process/manager.js'
 import { addAllowedPath, isPathAllowed } from '../tools/path-security.js'
+
+// A command that stays alive ~30s on both Unix and Windows (cmd.exe has no
+// `sleep`). Spawned in the OS temp dir, which exists on every platform.
+const LONG_LIVE_CMD = process.platform === 'win32' ? 'ping -n 31 127.0.0.1' : 'sleep 30'
+const TEST_CWD = tmpdir()
 import { SessionManager } from './manager.js'
 
 // Mock provider manager
@@ -141,8 +146,8 @@ describe('SessionManager', () => {
   it("deleteSession stops and removes the session's background processes", async () => {
     const session = manager.createSession(projectId)
 
-    const proc = bgpManager.createProcess(session.id, 'sleeper', 'sleep 30', '/tmp')!
-    const pid = bgpManager.startProcessCommand(proc.id, session.id, 'sleep 30', '/tmp')!
+    const proc = bgpManager.createProcess(session.id, 'sleeper', LONG_LIVE_CMD, TEST_CWD)!
+    const pid = bgpManager.startProcessCommand(proc.id, session.id, LONG_LIVE_CMD, TEST_CWD)!
     expect(pid).toBeGreaterThan(0)
 
     manager.deleteSession(session.id)
